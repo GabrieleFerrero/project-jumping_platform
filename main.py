@@ -433,6 +433,7 @@ class DataRepresenter():
                 if self.enable_representation and not empty:
                     error = not self.add_data(data)
                     if not error:
+                        #self.draw_graph()
                         if len(self.data_time)<=self.number_of_samples_for_mass_calculation:
                             label_acquisition_status.config(text=f"Stay still! Mass calculation {int((len(self.data_time)/self.number_of_samples_for_mass_calculation)*100)}%", fg="orange",  font=("Arial", 15))
                             root.update_idletasks()
