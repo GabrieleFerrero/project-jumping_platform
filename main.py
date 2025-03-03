@@ -1,22 +1,24 @@
 import tkinter as tk
 from tkinter import ttk
+from tkinter import filedialog, messagebox
+import os
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import serial
-import serial.tools.list_ports
-from time import sleep
+from serial.tools import list_ports
 from datetime import datetime
 import json
 from abc import ABC, abstractmethod
 import threading
 import time
 import queue
+import pandas as pd
 
 
 
 
 class TimeoutException(Exception):
-    """Eccezione personalizzata per il timeout"""
+    """Custom exception for timeout"""
     pass
 
 
@@ -94,37 +96,37 @@ class IODevice(ABC):
 
         self.device_connection = None
 
-        self.lock_IO = threading.Lock()
+        self.lock_IO = threading.RLock()
 
     def function_execution_with_timeout(self, timeout, func, *args, **kwargs):
         """
-        Wrapper che esegue una funzione con un limite di tempo.
-        :param timeout: Tempo massimo di esecuzione in secondi
-        :param func: La funzione da eseguire
-        :param args: Argomenti posizionali della funzione
-        :param kwargs: Argomenti keyword della funzione
-        :return: Il valore di ritorno della funzione se eseguita in tempo
-        :raises TimeoutException: Se la funzione impiega troppo tempo
+        Wrapper that executes a function with a time limit.
+        :param timeout: Maximum execution time in seconds
+        :param func: The function to execute
+        :param args: Positional arguments of the function
+        :param kwargs: Keyword arguments of the function
+        :return: The return value of the function if executed in time
+        :raises TimeoutException: If the function takes too long
         """
 
         #print(f"Function: {func}")
 
-        # Funzione per eseguire la funzione target
+        # Function to execute the target function
         def target(q, *args, **kwargs):
             try:
                 result = func(*args, **kwargs)
-                q.put(result)  # Mette il risultato nella coda
+                q.put(result)  # Put the result in the queue
             except Exception as e:
                 q.put(e)
 
-        # Creiamo una coda per ottenere il risultato dalla funzione
+        # Let's create a queue to get the result from the function
         q = queue.Queue()
         
-        # Eseguiamo la funzione in un thread separato
+        # We run the function in a separate thread
         thread = threading.Thread(target=target, args=(q, *args), kwargs=kwargs)
         thread.start()
 
-        # Aspettiamo che la funzione finisca o che il timeout scada
+        # We wait for the function to finish or for the timeout to expire
         thread.join(timeout)
 
         if thread.is_alive():
@@ -136,7 +138,7 @@ class IODevice(ABC):
             if isinstance(result, Exception):
                 raise result
             return result
-        return None  # Nel caso in cui la funzione non restituisca nulla
+        return None  # In case the function returns nothing
 
     
 
@@ -165,23 +167,23 @@ class IODevice(ABC):
         pass
     
 
-    def reset_buffer(self, automatic_error_resolution=False):
-        message = Message()
-        message.set_action(f"reset_buffer [{self.info_device}]")
+    def reset_buffer(self):
+        with self.lock_IO:
+            message = Message()
+            message.set_action(f"reset_buffer [{self.info_device}]")
 
-        try: 
-            with self.lock_IO:
+            try: 
                 self.function_execution_with_timeout(self.device_timeout, self._reset_buffer)
-            message.set_code(Code("OK"))
-            message.set_code_description("Buffer empty")
-        except Exception as e:
-            message.set_code(Code("ERROR"))
-            message.set_code_description(str(e))
+                message.set_code(Code("OK"))
+                message.set_code_description("Buffer empty")
+            except Exception as e:
+                message.set_code(Code("ERROR"))
+                message.set_code_description(str(e))
 
-        return message
+            return message
 
 
-    def check_connection(self, automatic_error_resolution=False):
+    def check_connection(self):
         with self.lock_IO:
             if self.device_connection==None: return False
             else: 
@@ -191,124 +193,101 @@ class IODevice(ABC):
                     return False
 
     
-    def close_connection(self, automatic_error_resolution=False):
-        message = Message()
-        message.set_action(f"close_connection [{self.info_device}]")
-
+    def close_connection(self):
         with self.lock_IO:
+            message = Message()
+            message.set_action(f"close_connection [{self.info_device}]")
+
+            
             try: self.function_execution_with_timeout(self.device_timeout, self._close_connection)
             except: pass
             self.device_connection = None
 
-        message.set_code(Code("OK"))
-        message.set_code_description("Connection closed")
+            message.set_code(Code("OK"))
+            message.set_code_description("Connection closed")
 
-        return message
+            return message
     
-    def open_connection(self, automatic_error_resolution=False):
-        message = Message()
-        message.set_action(f"open_connection [{self.info_device}]")
+    def open_connection(self):
+        with self.lock_IO:
+            message = Message()
+            message.set_action(f"open_connection [{self.info_device}]")
 
-        message.add_recalled_actions(self.close_connection(automatic_error_resolution=automatic_error_resolution))
+            message.add_recalled_actions(self.close_connection())
 
-        if self.info_device:
-            try:
-                with self.lock_IO:
+            if self.info_device:
+                try:
                     self.device_connection = self.function_execution_with_timeout(self.device_timeout, self._open_connection)
-                
-                message.add_recalled_actions(self.reset_buffer(automatic_error_resolution=automatic_error_resolution))
+                    message.add_recalled_actions(self.reset_buffer())
 
-                if self.check_connection(automatic_error_resolution=automatic_error_resolution):
-                    message.set_code(Code("OK"))
-                else:
+                    if self.check_connection():
+                        message.set_code(Code("OK"))
+                    else:
+                        message.set_code(Code("ERROR"))
+                        message.set_code_description("Connection failed")
+                        
+                except TimeoutException as e:
                     message.set_code(Code("ERROR"))
-                    message.set_code_description("Connection failed")
-                    
+                    message.set_code_description("Timeout Error")
+                except Exception as e:
+                    message.set_code(Code("ERROR"))
+                    message.set_code_description(str(e))
+            else:
+                message.set_code(Code("ERROR"))
+                message.set_code_description("info_device is empty")
+
+            return message
+    
+
+    
+    def read(self):
+        with self.lock_IO:
+            message = Message()
+            message.set_action(f"read [{self.info_device}]")
+
+            try:
+                result = self.function_execution_with_timeout(self.device_timeout, self._read)
+                message.set_code(Code("OK"))
+                message.set_response(result)
+            except TimeoutException as e:
+                message.set_code(Code("ERROR"))
+                message.set_code_description("Timeout Error")
+                message.set_response(None)
+            except Exception as e:
+                message.set_code(Code("ERROR"))
+                message.set_code_description(f"{e}")
+                message.set_response(None)
+
+            return message
+
+    
+    def write(self, data):
+        with self.lock_IO:
+            message = Message()
+            message.set_action(f"write [{self.info_device}]")
+
+            try:
+                result = self.function_execution_with_timeout(self.device_timeout, self._write, data)
+                message.set_code(Code("OK"))
+                message.set_response(result)
             except TimeoutException as e:
                 message.set_code(Code("ERROR"))
                 message.set_code_description("Timeout Error")
             except Exception as e:
                 message.set_code(Code("ERROR"))
-                message.set_code_description(str(e))
-        else:
-            message.set_code(Code("ERROR"))
-            message.set_code_description("info_device is empty")
+                message.set_code_description(f"{e}")
 
-        return message
+            return message
     
-
-    def error_resolution(self, automatic_error_resolution=False):
-        message = Message()
-        message.set_action(f"error_resolution [{self.info_device}]")
-        message.set_code(Code("OK"))
-
-        if automatic_error_resolution:
-            if not self.check_connection(automatic_error_resolution=automatic_error_resolution):
-                message.add_recalled_actions(self.open_connection(automatic_error_resolution=automatic_error_resolution))
-        
-
-        return message
-    
-
-    
-    def read(self, locked=True, automatic_error_resolution=False):
-        message = Message()
-        message.set_action(f"read [{self.info_device}]")
-
-        try:
-            if locked: self.lock_IO.acquire()
-            result = self.function_execution_with_timeout(self.device_timeout, self._read)
-            message.set_code(Code("OK"))
-            message.set_response(result)
-        except TimeoutException as e:
-            message.set_code(Code("ERROR"))
-            message.set_code_description("Timeout Error")
-            message.set_response(None)
-        except Exception as e:
-            message.set_code(Code("ERROR"))
-            message.set_code_description(f"{e}")
-            message.set_response(None)
-        finally:
-            if locked: self.lock_IO.release()
-
-        if message.get_code() == Code("ERROR"):
-            message.add_recalled_actions(self.error_resolution(automatic_error_resolution=automatic_error_resolution))
-
-        return message
-
-    
-    def write(self, data, locked=True, automatic_error_resolution=False):
-        message = Message()
-        message.set_action(f"write [{self.info_device}]")
-
-        try:
-            if locked: self.lock_IO.acquire()
-            result = self.function_execution_with_timeout(self.device_timeout, self._write, data)
-            message.set_code(Code("OK"))
-            message.set_response(result)
-        except TimeoutException as e:
-            message.set_code(Code("ERROR"))
-            message.set_code_description("Timeout Error")
-        except Exception as e:
-            message.set_code(Code("ERROR"))
-            message.set_code_description(f"{e}")
-        finally:
-            if locked: self.lock_IO.release()
-
-        if message.get_code() == Code("ERROR"):
-            message.add_recalled_actions(self.error_resolution(automatic_error_resolution=automatic_error_resolution))
-
-        return message
-    
-    def write_and_read(self, data, automatic_error_resolution=False):
-        message = Message()
-        message.set_action(f"write_and_read [{self.info_device}]")
-
+    def write_and_read(self, data):
         with self.lock_IO:
-            message_send = self.write(data, locked=False, automatic_error_resolution=False)
+            message = Message()
+            message.set_action(f"write_and_read [{self.info_device}]")
+            
+            message_send = self.write(data)
             message.add_recalled_actions(message_send)
             if message_send.get_code()==Code('OK'):
-                message_read = self.read(locked=False, automatic_error_resolution=False)
+                message_read = self.read()
                 message.add_recalled_actions(message_read)
                 if message_read.get_code()==Code('OK'):
                     message.set_code(Code("OK"))
@@ -319,11 +298,8 @@ class IODevice(ABC):
             else:
                 message.set_code(Code("ERROR"))
                 message.set_response(None)
-        
-        if message.get_code() == Code("ERROR"):
-            message.add_recalled_actions(self.error_resolution(automatic_error_resolution=automatic_error_resolution))
 
-        return message
+            return message
     
 
 class USBIODevice(IODevice):
@@ -361,7 +337,7 @@ class Arduino(USBIODevice):
     def _open_connection(self):
         if "port" in self.info_device and self.info_device["port"] and self.baudrate>0:
             device_connection=serial.Serial(port=self.info_device["port"], baudrate=self.baudrate, timeout=self.device_timeout+1)
-            sleep(1)
+            time.sleep(1)
             return device_connection
         else:
             return None
@@ -399,26 +375,19 @@ class Arduino(USBIODevice):
 
 
 class DataRepresenter():
-    def __init__(self, device, data_queue, data_acquirer, root):
-
-        self.device=device
-        self.data_queue=data_queue
-        self.data_acquirer=data_acquirer
-        self.root=root
+    def __init__(self):
 
         self.after_id=None
 
-        self.data_jpLX = []
-        self.data_jpRX = []
-        self.data_time = []
+        self.data_device = self.value_initialization_data_device()
+        self.data_processed = self.value_initialization_data_processed()
 
-        self.fs_representation=True
-        self.enable_representation=False
-        self.representing=threading.Lock()
+        self.fs_representation=True # force stop representation
+        self.representation=False        
 
         self.number_of_samples_for_mass_calculation=200
 
-        self.timeout_empty_queue=1
+        self.timeout_empty_queue=1 # s (seconds)
         self.time_sleep=1 # ms (milliseconds)
 
         self.force_stop_representation()
@@ -427,159 +396,239 @@ class DataRepresenter():
     
     def run(self):
         error=False
-        with self.representing:
-            if not self.fs_representation:
-                data, empty = self.get_data()
-                if self.enable_representation and not empty:
-                    error = not self.add_data(data)
-                    if not error:
-                        #self.draw_graph()
-                        if len(self.data_time)<=self.number_of_samples_for_mass_calculation:
-                            label_acquisition_status.config(text=f"Stay still! Mass calculation {int((len(self.data_time)/self.number_of_samples_for_mass_calculation)*100)}%", fg="orange",  font=("Arial", 15))
-                            root.update_idletasks()
-                        else:
-                            label_acquisition_status.config(text=f"Jump!", fg="green",  font=("Arial", 15))
-                            root.update_idletasks() 
-                elif not self.enable_representation and not empty:
-                    error = not self.add_data(data)
-                    label_acquisition_status.config(text="Analysis in progress...", font=("Arial", 15), fg="purple")
-                    root.update_idletasks()
-                elif self.enable_representation and empty:
-                    label_acquisition_status.config(text="Waiting for data...", font=("Arial", 15), fg="blue")
-                    root.update_idletasks()
-                elif not self.enable_representation and empty:
-                    label_acquisition_status.config(text="Acquisition status: Stop", font=("Arial", 15), fg="black")
-                    root.update_idletasks()
-                    self.extrapolate_data()
-                    self.draw_graph()
+        if not self.fs_representation:
+            data, empty = self.get_data()
+            if self.representation and not empty:
+                error = not self.add_data(data)
+                if not error:
+                    #self.draw_chart()
+                    if len(self.data_device["time"])<=self.number_of_samples_for_mass_calculation:
+                        label_acquisition_status.config(text=f"Stay still! Mass calculation {int((len(self.data_device["time"])/self.number_of_samples_for_mass_calculation)*100)}%", fg="orange",  font=("Arial", 15))
+                        root.update_idletasks()
+                    else:
+                        label_acquisition_status.config(text=f"Jump!", fg="green",  font=("Arial", 15))
+                        root.update_idletasks() 
+            elif not self.representation and not empty:
+                error = not self.add_data(data)
+                label_acquisition_status.config(text="Analysis in progress...", font=("Arial", 15), fg="purple")
+                root.update_idletasks()
+            elif self.representation and empty:
+                label_acquisition_status.config(text="Waiting for data...", font=("Arial", 15), fg="blue")
+                root.update_idletasks()
+            elif not self.representation and empty:
+                label_acquisition_status.config(text="Acquisition status: Stop", font=("Arial", 15), fg="black")
+                root.update_idletasks()
+
+                self.fs_representation=True
+                self.data_processing()
+                self.show_data_processed()
+                self.save_data()
+                self.show_data_device()
 
         if error:
             label_acquisition_status.config(text="Error in analysis!", font=("Arial", 15), fg="red")
             root.update_idletasks()
-            self.force_stop_representation()
             if not check_device_connection():
+                self.force_stop_representation()
                 disconnect_device()
-                update_device_list(None)
+                func_Focus_combobox_menu_device(None)
 
-        self.after_id = self.root.after(self.time_sleep, self.run)
+        self.after_id = root.after(self.time_sleep, self.run)
 
 
+    def value_initialization_data_device(self):
+        data_device={
+            "time":[],
+            "jpLX":[],
+            "jpRX":[]
+        }
 
-    def set_graph(self, data_time, data_jpLX, data_jpRX):
-        line_jpLX.set_data(data_time, data_jpLX)
-        line_jpRX.set_data(data_time, data_jpRX)
+        return data_device
+
+    def set_data_device(self, data_device):
+        line_jpLX.set_data(data_device["time"], data_device["jpLX"])
+        line_jpRX.set_data(data_device["time"], data_device["jpRX"])
         ax_jpLX.relim()
         ax_jpRX.relim()
         ax_jpLX.autoscale_view()
         ax_jpRX.autoscale_view()
         canvas.draw()
 
-    def draw_default_graph(self):
-        self.set_graph([], [], [])
+    def show_default_data_device(self):
+        data_device = self.value_initialization_data_device()
+        self.set_data_device(data_device)
 
-    def draw_graph(self):
-        self.set_graph(self.data_time, self.data_jpLX, self.data_jpRX)
+    def show_data_device(self):
+        self.set_data_device(self.data_device)
 
-    def set_extrapolate_data(self, e_data):
-        label_indicator_mass.config(text=f"Mass: {round(e_data["mass"],2)} Kg", fg=e_data["status_color"])
-        label_indicator_jump_time_LX.config(text=f"Jump time LX: {e_data["jump_time_LX_value"]} s", fg=e_data["status_color"])
-        label_indicator_jump_time_RX.config(text=f"Jump time RX: {e_data["jump_time_RX_value"]} s", fg=e_data["status_color"])
-        label_indicator_jump_time_AVG.config(text=f"Jump time AVG: {e_data["jump_time_AVG_value"]} s", fg=e_data["status_color"])
-        label_indicator_first_touch_LX.config(text=f"First touch LX: {e_data["first_touch_LX_value"]} s", fg=e_data["status_color"])
-        label_indicator_first_touch_RX.config(text=f"First touch RX: {e_data["first_touch_RX_value"]} s", fg=e_data["status_color"])
-        label_indicator_expressed_strength_LX.config(text=f"Expressed strength LX: {e_data["expressed_strength_LX_value"]} N", fg=e_data["status_color"])
-        label_indicator_expressed_strength_RX.config(text=f"Expressed strength RX: {e_data["expressed_strength_RX_value"]} N", fg=e_data["status_color"])
-        label_indicator_expressed_strength_AVG.config(text=f"Expressed strength AVG: {e_data["expressed_strength_AVG_value"]} N", fg=e_data["status_color"])
+    def value_initialization_data_processed(self):
+        data = {
+            "mass": 0.0,
+            "jump_height": 0.0,
+            "jump_time_LX_value": 0.0,
+            "jump_time_RX_value": 0.0,
+            "jump_time_AVG_value": 0.0,
+            "first_touch_LX_value": 0.0,
+            "first_touch_RX_value": 0.0,
+            "expressed_strength_LX_value": 0.0,
+            "expressed_strength_RX_value": 0.0,
+            "expressed_strength_AVG_value": 0.0
+        }
+
+        return {"data":data, "state":{"value":False, "color":"black"}, "date":datetime.now()}
+
+    def set_processed_data(self, data_processed):
+        label_indicator_mass.config(text=f"Mass: {round(data_processed["data"]["mass"],2)} Kg", fg=data_processed["state"]["color"])
+        label_indicator_jump_height.config(text=f"Jump height: {round(data_processed["data"]["jump_height"],2)} cm", fg=data_processed["state"]["color"])
+        label_indicator_jump_time_LX.config(text=f"Jump time LX: {round(data_processed["data"]["jump_time_LX_value"], 5)} s", fg=data_processed["state"]["color"])
+        label_indicator_jump_time_RX.config(text=f"Jump time RX: {round(data_processed["data"]["jump_time_RX_value"], 5)} s", fg=data_processed["state"]["color"])
+        label_indicator_jump_time_AVG.config(text=f"Jump time AVG: {round(data_processed["data"]["jump_time_AVG_value"], 5)} s", fg=data_processed["state"]["color"])
+        label_indicator_first_touch_LX.config(text=f"First touch LX: {round(data_processed["data"]["first_touch_LX_value"], 5)} s", fg=data_processed["state"]["color"])
+        label_indicator_first_touch_RX.config(text=f"First touch RX: {round(data_processed["data"]["first_touch_RX_value"], 5)} s", fg=data_processed["state"]["color"])
+        label_indicator_expressed_strength_LX.config(text=f"Expressed strength LX: {round(data_processed["data"]["expressed_strength_LX_value"], 3)} N", fg=data_processed["state"]["color"])
+        label_indicator_expressed_strength_RX.config(text=f"Expressed strength RX: {round(data_processed["data"]["expressed_strength_RX_value"], 3)} N", fg=data_processed["state"]["color"])
+        label_indicator_expressed_strength_AVG.config(text=f"Expressed strength AVG: {round(data_processed["data"]["expressed_strength_AVG_value"], 3)} N", fg=data_processed["state"]["color"])
         root.update_idletasks()
 
-    def default_extrapolate_data(self):
-        de_data = {
-            "status_color": "black",
-            "mass": 0.0,
-            "jump_time_LX_value": 0.0,
-            "jump_time_RX_value": 0.0,
-            "jump_time_AVG_value": 0.0,
-            "first_touch_LX_value": 0.0,
-            "first_touch_RX_value": 0.0,
-            "expressed_strength_LX_value": 0.0,
-            "expressed_strength_RX_value": 0.0,
-            "expressed_strength_AVG_value": 0.0
-            
-        }
-        self.set_extrapolate_data(de_data)
+    def data_processing(self):
+        data_processed = self.value_initialization_data_processed()
+        acceleration_of_gravity = 9.81
 
-    def extrapolate_data(self):
-        e_data = {
-            "status_color": "black",
-            "mass": 0.0,
-            "jump_time_LX_value": 0.0,
-            "jump_time_RX_value": 0.0,
-            "jump_time_AVG_value": 0.0,
-            "first_touch_LX_value": 0.0,
-            "first_touch_RX_value": 0.0,
-            "expressed_strength_LX_value": 0.0,
-            "expressed_strength_RX_value": 0.0,
-            "expressed_strength_AVG_value": 0.0
-        }
-
-        if self.data_time:
-            if len(self.data_time)<self.number_of_samples_for_mass_calculation:
-                e_data["status_color"]="red"
-                e_data["mass"]=-1
+        if self.data_device["time"]:
+            if len(self.data_device["time"])<self.number_of_samples_for_mass_calculation:
+                data_processed["state"]["color"]="red"
+                data_processed["data"]["mass"]=-1
             else:
 
-                mass_LX = (sum(self.data_jpLX[0:self.number_of_samples_for_mass_calculation])/self.number_of_samples_for_mass_calculation)/9.81
-                mass_RX = (sum(self.data_jpRX[0:self.number_of_samples_for_mass_calculation])/self.number_of_samples_for_mass_calculation)/9.81
-                e_data["mass"] = mass_LX+mass_RX
+                mass_LX = (sum(self.data_device["jpLX"][0:self.number_of_samples_for_mass_calculation])/self.number_of_samples_for_mass_calculation)/acceleration_of_gravity
+                mass_RX = (sum(self.data_device["jpRX"][0:self.number_of_samples_for_mass_calculation])/self.number_of_samples_for_mass_calculation)/acceleration_of_gravity
+                data_processed["data"]["mass"] = mass_LX+mass_RX
 
 
-                first_touch_LX_index_start = next((i for i, strength_value in enumerate(self.data_jpLX) if strength_value!=0), None)
-                first_touch_RX_index_start = next((i for i, strength_value in enumerate(self.data_jpRX) if strength_value!=0), None)
-                first_touch_LX_index_end = next((i for i, strength_value in enumerate(self.data_jpLX[::-1]) if strength_value!=0), None)
-                first_touch_RX_index_end = next((i for i, strength_value in enumerate(self.data_jpRX[::-1]) if strength_value!=0), None)
+                first_touch_LX_index_start = next((i for i, strength_value in enumerate(self.data_device["jpLX"]) if strength_value!=0), None)
+                first_touch_RX_index_start = next((i for i, strength_value in enumerate(self.data_device["jpRX"]) if strength_value!=0), None)
+                first_touch_LX_index_end = next((i for i, strength_value in enumerate(self.data_device["jpLX"][::-1]) if strength_value!=0), None)
+                first_touch_RX_index_end = next((i for i, strength_value in enumerate(self.data_device["jpRX"][::-1]) if strength_value!=0), None)
 
                 if first_touch_RX_index_start is not None and first_touch_LX_index_start is not None:
-                    first_leave_LX_value=self.data_time[first_touch_LX_index_start]
-                    first_leave_RX_value=self.data_time[first_touch_RX_index_start]
+                    first_leave_LX_value=self.data_device["time"][first_touch_LX_index_start]
+                    first_leave_RX_value=self.data_device["time"][first_touch_RX_index_start]
 
                     if first_touch_RX_index_end is not None and first_touch_LX_index_end is not None:
-                        e_data["first_touch_LX_value"]=self.data_time[first_touch_LX_index_end]
-                        e_data["first_touch_RX_value"]=self.data_time[first_touch_RX_index_end]
+                        data_processed["data"]["first_touch_LX_value"]=self.data_device["time"][first_touch_LX_index_end]
+                        data_processed["data"]["first_touch_RX_value"]=self.data_device["time"][first_touch_RX_index_end]
 
-                        e_data["jump_time_LX_value"]=e_data["first_touch_LX_value"]-first_leave_LX_value
-                        e_data["jump_time_RX_value"]=e_data["first_touch_RX_value"]-first_leave_RX_value
-                        e_data["jump_time_AVG_value"]=(e_data["jump_time_LX_value"]+e_data["jump_time_RX_value"])/2
+                        data_processed["data"]["jump_time_LX_value"]=data_processed["data"]["first_touch_LX_value"]-first_leave_LX_value
+                        data_processed["data"]["jump_time_RX_value"]=data_processed["data"]["first_touch_RX_value"]-first_leave_RX_value
+                        data_processed["data"]["jump_time_AVG_value"]=(data_processed["data"]["jump_time_LX_value"]+data_processed["data"]["jump_time_RX_value"])/2
+
+                        data_processed["data"]["jump_height"]=((1/2)*acceleration_of_gravity*((data_processed["data"]["jump_time_AVG_value"]/2)**2))*100 # cm
 
                     
-                    e_data["expressed_strength_AVG_value"]=(e_data["expressed_strength_LX_value"]+e_data["expressed_strength_RX_value"])/2
+                    data_processed["data"]["expressed_strength_AVG_value"]=(data_processed["data"]["expressed_strength_LX_value"]+data_processed["data"]["expressed_strength_RX_value"])/2
+
+                    data_processed["state"]["value"]=True
 
         else:
-            e_data["status_color"]="red"
+            data_processed["state"]["color"]="red"
 
-        self.set_extrapolate_data(e_data)
+        self.data_processed=data_processed
+   
 
+    def show_default_data_processed(self):
+        data_processed = self.value_initialization_data_processed()
+        self.set_processed_data(data_processed)
+
+    def show_data_processed(self):
+        self.set_processed_data(self.data_processed)
+
+    def initialization_data(self):
+        self.data_device = self.value_initialization_data_device()
+        self.data_processed = self.value_initialization_data_processed()
+
+    def data_is_saved(self):
+        if self.data_processed["state"]["value"]:
+            if data_saving_file_path:    
+                try:
+                    if os.path.exists(data_saving_file_path):
+                        df_to_save = pd.DataFrame([{**{"date":self.data_processed["date"].strftime('%Y-%m-%d %H:%M:%S')}, **self.data_processed["data"]}])
+                        df_old = pd.read_csv(data_saving_file_path)
+                        if (not df_old.empty) and ("date" in df_old.columns) and (df_to_save["date"].iloc[0] in df_old["date"].values): return True
+                except: pass
+        else: return True
+        
+        return False
+
+    
+    def save_data(self):
+        if self.data_processed["state"]["value"]:
+            if data_saving_file_path:    
+                try:
+                    df_to_save = pd.DataFrame([{"date":self.data_processed["date"].strftime('%Y-%m-%d %H:%M:%S'), **self.data_processed["data"]}])
+
+                    if os.path.exists(data_saving_file_path):
+                        try: df_old = pd.read_csv(data_saving_file_path)
+                        except pd.errors.EmptyDataError: df_old = pd.DataFrame()
+
+                        if (df_old.empty) or ("date" not in df_old.columns):
+                            df_to_save.to_csv(data_saving_file_path, index=False, header=True)
+                        
+                        elif df_to_save["date"].iloc[0] not in df_old["date"].values:
+                            df = pd.concat([df_old, df_to_save], ignore_index=True)
+                            df.to_csv(data_saving_file_path, index=False, header=True)
+                        else:
+                            #print("Data already present, not added.")
+                            pass
+                    else:
+                        df_to_save.to_csv(data_saving_file_path, index=False, header=True)
+                    
+                    return True
+                except: show_warning("Warning", "Problems saving data!")
+            else: show_warning("Warning", "File not selected for saving! Please choose a file.")
+        else: return True
+        
+        return False
+
+                
     
     def _start_representation(self):
         self.force_stop_representation()
-        with self.representing:
-            self.fs_representation=False
-            self.data_acquirer.stop_acquisition()
-            while not self.get_data()[1]: pass
-            self.data_acquirer.start_acquisition()
-            self.enable_representation=True
-        self.after_id = self.root.after(self.time_sleep, self.run)
+        # The acquisition is at a standstill:
+
+        # flag management
+        self.fs_representation=False
+        self.representation=True
+        
+        
+        # empty the queue
+        data_acquirer.stop_acquisition()
+        while not self.get_data()[1]: pass
+        data_acquirer.start_acquisition()
+        
+        self.after_id = root.after(self.time_sleep, self.run)
 
     def start_representation(self):
-        self.data_jpLX = []
-        self.data_jpRX = []
-        self.data_time = []
-        self.default_extrapolate_data()
-        self.draw_default_graph()
-        self._start_representation()
+        start=False
+        if not self.data_is_saved():
+            confirm = confirm_unsaved_data()
+            if (confirm is not None) and confirm:
+                start=True
+            else:
+                start=False
+        else:
+            start=True
+
+        if start:
+            label_acquisition_status.config(text="Initialization...", font=("Arial", 15), fg="black")
+            root.update_idletasks()
+            self.initialization_data()
+            self.show_default_data_processed()
+            self.show_default_data_device()
+            self._start_representation()
 
     def _stop_representation(self):
-        self.data_acquirer.stop_acquisition()
-        with self.representing: self.enable_representation=False
+        data_acquirer.stop_acquisition()
+        self.representation=False
 
     def stop_representation(self):
         self._stop_representation()
@@ -589,20 +638,20 @@ class DataRepresenter():
         self._stop_representation()
 
     def stop_representation_activity(self):
-        try: self.root.after_cancel(self.after_id)
+        try: root.after_cancel(self.after_id)
         except: pass
         self.force_stop_representation()
 
     def get_data(self):
-        try: return (self.data_queue.get(timeout=self.timeout_empty_queue), False)
+        try: return (data_queue.get(timeout=self.timeout_empty_queue), False)
         except: return (None, True)
     
     def add_data(self, data):
         if data is not None and data[0] is not None:
             if data[0]["code"]=="OK" and data[0]["jpLX"] is not None and data[0]["jpRX"] is not None:
-                self.data_time.append(data[1])
-                self.data_jpLX.append(data[0]["jpLX"])
-                self.data_jpRX.append(data[0]["jpRX"])
+                self.data_device["time"].append(data[1])
+                self.data_device["jpLX"].append(data[0]["jpLX"])
+                self.data_device["jpRX"].append(data[0]["jpRX"])
             return True
         else: return False
             
@@ -620,41 +669,49 @@ class DataAcquirer(threading.Thread):
         self.data_queue=data_queue
 
         self.acquisition_activity=True
-        self.enable_acquisition=False
+        self.acquisition=False
         self.acquiring=threading.Lock()
 
-        self.acquisition_start_time=datetime.now()
+        self.acquisition_start_time=time.time()
 
-        self.time_sleep=0.0001
+        self.time_sleep_acquiring=0.0001
+        self.time_sleep_not_acquiring=0.3
 
         self._stop_acquisition()
     
     def run(self):
         while self.acquisition_activity:
-            error=False
             with self.acquiring:
-                if self.enable_acquisition:
+                error=False
+                if self.acquisition:
                     data = self.get_data()
 
                     if data is None: error=True
 
-                    self.data_queue.put((data, (datetime.now()-self.acquisition_start_time).total_seconds()))
+                    self.data_queue.put((data, time.time()-self.acquisition_start_time))
 
-            if error: self._stop_acquisition()
-            time.sleep(self.time_sleep)
+                if error: self._stop_acquisition()
+
+            if self.acquisition:
+                time.sleep(self.time_sleep_acquiring)
+            else:
+                time.sleep(self.time_sleep_not_acquiring)
+
 
     def _start_acquisition(self):
-        with self.acquiring: self.enable_acquisition=True
+        self.acquisition=True
 
     def start_acquisition(self):
-        self.acquisition_start_time = datetime.now()
-        self._start_acquisition()
+        with self.acquiring: 
+            self.acquisition_start_time = time.time()
+            self._start_acquisition()
 
     def _stop_acquisition(self):
-        with self.acquiring: self.enable_acquisition=False
+        self.acquisition=False
 
     def stop_acquisition(self):
-        self._stop_acquisition()
+        with self.acquiring: 
+            self._stop_acquisition()
 
     def stop_acquisition_activity(self):
         self.acquisition_activity=False
@@ -679,12 +736,10 @@ class DataAcquirer(threading.Thread):
 
 
 
-
-
 def get_usb_devices():
     device_list = []
     valid_devices = []
-    devices_found = serial.tools.list_ports.comports()
+    devices_found = list_ports.comports()
     for device in devices_found: 
         if device.vid is not None and device.pid is not None and device.device: valid_devices.append(device)
 
@@ -707,22 +762,22 @@ def connect_device(info_device):
     if check_device_connection():
         label_acquisition_status.config(text="Acquisition status: Stop", font=("Arial", 15), fg="black")
         root.update_idletasks()
-        scale_tare()
+        command_button_scale_tare()
     else:
         disconnect_device()
-        update_device_list(None)
+        func_Focus_combobox_menu_device(None)
 
 def disconnect_device():
     label_status_connection.config(text="Disconnecting...", fg="orange")
     label_scale_tare.config(text="Not calibrated!", fg="red")
     root.update_idletasks() 
     data_representer.force_stop_representation()
-    data_representer.default_extrapolate_data()
-    data_representer.draw_default_graph()
+    data_representer.show_default_data_processed()
+    data_representer.show_default_data_device()
     arduino.close_connection()
     check_device_connection()
 
-def update_device_list(event):
+def func_Focus_combobox_menu_device(event):
     data_device = get_usb_devices()
     if data_device: combobox_menu_device['values'] = [device["port"] for device in data_device]
     else:
@@ -731,8 +786,8 @@ def update_device_list(event):
     root.update_idletasks() 
     return len(data_device)
     
-def on_device_selected(event):
-    selected = device_var.get()
+def func_ComboboxSelected_combobox_menu_device(event):
+    selected = stringvar_menu_device.get()
     info_device = {"port":selected}
     connect_device(info_device)
         
@@ -747,27 +802,36 @@ def check_device_connection():
     root.update_idletasks() 
     return status_connection
 
-def start_acquisition():
-    if check_device_connection():
-        label_acquisition_status.config(text="Initialization...", font=("Arial", 15), fg="black")
-        root.update_idletasks()
-        data_representer.start_representation()
+def command_button_start():
+    if check_device_connection(): data_representer.start_representation()
     else: 
         disconnect_device()
-        update_device_list(None)
+        func_Focus_combobox_menu_device(None)
 
-def stop_acquisition():
+def command_button_stop():
     data_representer.stop_representation()
 
-def on_close():
+def func_WM_DELETE_WINDOW():
     data_representer.stop_representation_activity()
     data_acquirer.stop_acquisition_activity()
-    data_acquirer.join()
-    disconnect_device()
-    root.quit()
-    root.destroy()
 
-def scale_tare():
+    finish=False
+    if not data_representer.data_is_saved():
+        confirm = confirm_unsaved_data()
+        if (confirm is not None) and confirm:
+            finish=True
+        else:
+            finish=False
+    else:
+        finish=True
+    
+    if finish:
+        data_acquirer.join()
+        disconnect_device()
+        root.quit()
+        root.destroy()
+
+def command_button_scale_tare():
     label_scale_tare.config(text="Calibration...", fg="black")
     root.update_idletasks() 
     if check_device_connection():
@@ -788,9 +852,53 @@ def scale_tare():
         root.update_idletasks() 
     else: 
         disconnect_device()
-        update_device_list(None)
-    
+        func_Focus_combobox_menu_device(None)
 
+def update_label_open_file():
+    label_open_file.config(text=f"Open file: {data_saving_file_path}", fg="black")
+    root.update_idletasks() 
+
+def open_file():
+    """Allows the user to select an existing file."""
+    global data_saving_file_path
+    file_path = filedialog.askopenfilename(title="Select a CSV file", filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
+    if file_path: data_saving_file_path=file_path
+    update_label_open_file()
+
+
+def new_file():
+    """Allows the user to choose a name and folder for a new file."""
+    global data_saving_file_path
+    file_path = filedialog.asksaveasfilename(title="Create a new CSV file",
+                                             defaultextension=".csv",
+                                             filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
+    
+    if file_path: data_saving_file_path=file_path
+    update_label_open_file()
+
+
+def command_button_save():
+    data_representer.save_data()
+
+def confirm_unsaved_data():
+    """Opens a dialog asking the user whether to save before proceeding.
+    
+    Returns:
+        True if "Save" is selected,
+        False if "Don't Save" is selected,
+        None if "Cancel" is selected.
+    """
+    root = tk.Tk()
+    root.withdraw()  # Hide the main window
+    response = messagebox.askyesnocancel("Unsaved Changes", "Are you sure you want to proceed without saving?")
+    return response 
+                
+
+    
+def show_warning(title, message):
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showwarning(title, message)
 
 # ----------------------
 
@@ -798,58 +906,75 @@ root = tk.Tk()
 arduino = Arduino(device_timeout=2, baudrate=460800)
 data_queue=queue.Queue()
 data_acquirer = DataAcquirer(arduino, data_queue)
-data_representer = DataRepresenter(arduino, data_queue, data_acquirer, root)
+data_representer = DataRepresenter()
+data_saving_file_path = ""
 
-
-# Creazione finestra principale
+# Creation of main window
 root.title("Jumping platform")
 root.geometry("1000x1000")
-root.protocol("WM_DELETE_WINDOW", on_close)
+root.protocol("WM_DELETE_WINDOW", func_WM_DELETE_WINDOW)
 
-# Sezione superiore: Selezione dispositivo e stato
-frame_top = tk.Frame(root)
-frame_top.pack(pady=10)
+menu_bar = tk.Menu(root)
+file_menu = tk.Menu(menu_bar, tearoff=0)
+file_menu.add_command(label="New", command=new_file)
+file_menu.add_command(label="Open", command=open_file)
+menu_bar.add_cascade(label="File", menu=file_menu)
+root.config(menu=menu_bar)
 
-tk.Label(frame_top, text="Select Device:").pack(side=tk.LEFT)
-device_var = tk.StringVar()
-combobox_menu_device = ttk.Combobox(frame_top, textvariable=device_var, state="readonly")
+frame_open_file = tk.Frame(root)
+frame_open_file.pack(fill="x")
+label_open_file = tk.Label(frame_open_file, text=f"Open file: {data_saving_file_path}", padx=10)
+label_open_file.pack(side=tk.LEFT, padx=10)
+
+# Device Selection and Status
+frame_menu_device = tk.Frame(root)
+frame_menu_device.pack(pady=10)
+
+tk.Label(frame_menu_device, text="Select Device:").pack(side=tk.LEFT)
+stringvar_menu_device = tk.StringVar()
+combobox_menu_device = ttk.Combobox(frame_menu_device, textvariable=stringvar_menu_device, state="readonly")
 combobox_menu_device.pack(side=tk.LEFT, padx=10)
-combobox_menu_device.bind("<<ComboboxSelected>>", on_device_selected)
-combobox_menu_device.bind("<FocusIn>", update_device_list)
-combobox_menu_device.bind("<FocusOut>", update_device_list)
+combobox_menu_device.bind("<<ComboboxSelected>>", func_ComboboxSelected_combobox_menu_device)
+combobox_menu_device.bind("<FocusIn>", func_Focus_combobox_menu_device)
+combobox_menu_device.bind("<FocusOut>", func_Focus_combobox_menu_device)
 
-label_status_connection = tk.Label(frame_top, text="Not Connected", fg="red")
+label_status_connection = tk.Label(frame_menu_device, text="Not Connected", fg="red")
 label_status_connection.pack(side=tk.LEFT, padx=10)
 
-update_device_list(None)
+func_Focus_combobox_menu_device(None)
 
 # Scale tare
 frame_scale_tare = tk.Frame(root)
 frame_scale_tare.pack(pady=10)
-btn_scale_tare = tk.Button(frame_scale_tare, text="Tare", command=scale_tare)
-btn_scale_tare.pack(side=tk.LEFT, padx=10)
+button_scale_tare = tk.Button(frame_scale_tare, text="Tare", command=command_button_scale_tare)
+button_scale_tare.pack(side=tk.LEFT, padx=10)
 label_scale_tare = tk.Label(frame_scale_tare, text=f"Not calibrated!", font=("Arial", 12), fg="red")
 label_scale_tare.pack(side=tk.LEFT, padx=20)
 
-# Sezione pulsanti
+# Button section
 frame_acquisition = tk.Frame(root)
 frame_acquisition.pack(pady=10)
 
-btn_start = tk.Button(frame_acquisition, text="Start", command=start_acquisition)
-btn_start.pack(side=tk.LEFT, padx=10)
-btn_stop = tk.Button(frame_acquisition, text="Stop", command=stop_acquisition)
-btn_stop.pack(side=tk.LEFT, padx=10)
+button_start = tk.Button(frame_acquisition, text="Start", command=command_button_start)
+button_start.pack(side=tk.LEFT, padx=10)
+button_stop = tk.Button(frame_acquisition, text="Stop", command=command_button_stop)
+button_stop.pack(side=tk.LEFT, padx=10)
+button_save = tk.Button(frame_acquisition, text="Save", command=command_button_save)
+button_save.pack(side=tk.LEFT, padx=10)
 
-# Sezione indicatori
+
+# Indicators section
 frame_acquisition_status = tk.LabelFrame(root)
 frame_acquisition_status.pack(pady=10)
 label_acquisition_status = tk.Label(frame_acquisition_status, text=f"Acquisition status: Stop", font=("Arial", 15))
 label_acquisition_status.pack(side=tk.LEFT, padx=20)
 
-frame_indicator_mass = tk.LabelFrame(root, text=f"Mass", padx=10, pady=10)
-frame_indicator_mass.pack(pady=10, padx=10, fill="both")
-label_indicator_mass = tk.Label(frame_indicator_mass, text=f"Mass: {0.0} Kg", font=("Arial", 12))
+frame_indicator_general_data = tk.LabelFrame(root, text=f"General data", padx=10, pady=10)
+frame_indicator_general_data.pack(pady=10, padx=10, fill="both")
+label_indicator_mass = tk.Label(frame_indicator_general_data, text=f"Mass: {0.0} Kg", font=("Arial", 12))
 label_indicator_mass.pack(side=tk.LEFT, padx=20)
+label_indicator_jump_height = tk.Label(frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
+label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
 
 frame_indicator_jump_time = tk.LabelFrame(root, text=f"Jump time", padx=10, pady=10)
 frame_indicator_jump_time.pack(pady=10, padx=10, fill="both")
@@ -876,20 +1001,20 @@ label_indicator_expressed_strength_RX.pack(side=tk.LEFT, padx=20)
 label_indicator_expressed_strength_AVG = tk.Label(frame_indicator_expressed_strength, text=f"Expressed strength AVG: {0.0} N", font=("Arial", 12))
 label_indicator_expressed_strength_AVG.pack(side=tk.LEFT, padx=20)
 
-# Sezione grafici
-frame_bottom = tk.Frame(root)
-frame_bottom.pack(fill=tk.BOTH, expand=True)
+# Chart section
+frame_chart = tk.Frame(root)
+frame_chart.pack(fill=tk.BOTH, expand=True)
 
-# Creazione della figura e degli assi
+# Creating the figure and axes
 fig, (ax_jpLX, ax_jpRX) = plt.subplots(2, 1, figsize=(5, 3))
-fig.tight_layout()  # Migliora la disposizione
-fig.subplots_adjust(hspace=0.5)  # Aumenta lo spazio verticale tra i grafici
+fig.tight_layout()  # Improve the layout
+fig.subplots_adjust(hspace=0.5)  # Increase vertical space between charts
 
-# Creazione delle linee vuote
+# Creation of empty lines
 line_jpLX, = ax_jpLX.plot([], [])
 line_jpRX, = ax_jpRX.plot([], [])
 
-# Configurazione degli assi
+# Axis configuration
 ax_jpLX.set_title("Left Footrest")
 ax_jpRX.set_title("Right Footrest")
 ax_jpLX.set_xlabel("Time (s)")
@@ -897,17 +1022,19 @@ ax_jpRX.set_xlabel("Time (s)")
 ax_jpLX.set_ylabel("Newton (N)")
 ax_jpRX.set_ylabel("Newton (N)")
 
-# Integrazione con Tkinter
-canvas = FigureCanvasTkAgg(fig, master=frame_bottom)
+# Tkinter Integration
+canvas = FigureCanvasTkAgg(fig, master=frame_chart)
 canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 canvas.draw()
 
-# Aggiunta della barra degli strumenti sopra il grafico
-toolbar = NavigationToolbar2Tk(canvas, frame_bottom)
+# Adding the toolbar above the chart
+toolbar = NavigationToolbar2Tk(canvas, frame_chart)
 toolbar.pack(side=tk.TOP, fill=tk.X)
 canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-# Avvio aggiornamento grafici
+# Starting data acquirer
 data_acquirer.start()
 
+# Starting root mainloop
 root.mainloop()
+
