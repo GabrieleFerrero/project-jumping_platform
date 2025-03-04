@@ -18,7 +18,8 @@ The system is built using the following components:
 
 - [ESP32-WROOM-32](https://www.espressif.com/en/products/socs/esp32)
 - [ADS1256](https://www.ti.com/product/ADS1256)
-- YZC-516C Load Cell:&#x20;
+- YZC-516C Load Cell:
+  ![YZC-516C Load Cell](images/datasheet_YZC-516C.jpeg)
 
 ## Wiring Connections
 
@@ -63,7 +64,15 @@ pip install -r requirements.txt
 
 ## Usage
 
-Once the hardware is set up and software dependencies are installed, you can run the program to start measuring jump parameters.
+Once the hardware is set up and software dependencies are installed, you can run the program using:
+
+```sh
+python main.py
+```
+
+### Requirements
+
+This program requires **Python 3.12 or higher** to run correctly.
 
 ---
 
