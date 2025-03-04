@@ -902,7 +902,7 @@ def show_warning(title, message):
 # ----------------------
 
 root = tk.Tk()
-arduino = Arduino(device_timeout=2, baudrate=115200)
+arduino = Arduino(device_timeout=2, baudrate=460800)
 data_queue=queue.Queue()
 data_acquirer = DataAcquirer(arduino, data_queue)
 data_representer = DataRepresenter()
