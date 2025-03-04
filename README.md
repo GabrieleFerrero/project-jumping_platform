@@ -18,8 +18,7 @@ The system is built using the following components:
 
 - [ESP32-WROOM-32](https://www.espressif.com/en/products/socs/esp32)
 - [ADS1256](https://www.ti.com/product/ADS1256)
-- YZC-516C Load Cell:
-  ![YZC-516C Load Cell](images/datasheet_YZC-516C.jpeg)
+- [YZC-516C Load Cell](images/datasheet_YZC-516C.jpeg)
 
 ## Wiring Connections
 
