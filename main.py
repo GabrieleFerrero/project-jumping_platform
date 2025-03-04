@@ -555,7 +555,7 @@ class DataRepresenter():
                         df_old = pd.read_csv(data_saving_file_path)
                         if (not df_old.empty) and ("date" in df_old.columns) and (df_to_save["date"].iloc[0] in df_old["date"].values): return True
                 except: pass
-        else: return True
+        else: return True # it means that the data does not need to be saved, so I consider it as if it were already saved
         
         return False
 
@@ -585,7 +585,7 @@ class DataRepresenter():
                     return True
                 except: show_warning("Warning", "Problems saving data!")
             else: show_warning("Warning", "File not selected for saving! Please choose a file.")
-        else: return True
+        else: return True # it means that the data does not need to be saved, so I consider it as if it were already saved
         
         return False
 
