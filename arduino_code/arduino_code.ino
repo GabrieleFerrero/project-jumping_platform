@@ -30,7 +30,7 @@ void setup() {
   load_cells_adc.setDRATE(DRATE_30000SPS); // Maximum sampling rate (30k SPS)
   // --------------------- //
 
-  Serial.begin(115200);
+  Serial.begin(460800);
   while (!Serial) {
     ; // wait for serial port to connect. Needed for native USB
   } 
