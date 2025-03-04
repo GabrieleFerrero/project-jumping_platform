@@ -551,9 +551,8 @@ class DataRepresenter():
             if data_saving_file_path:    
                 try:
                     if os.path.exists(data_saving_file_path):
-                        df_to_save = pd.DataFrame([{"date":self.data_processed["date"].strftime('%Y-%m-%d %H:%M:%S'), **self.data_processed["data"]}])
                         df_old = pd.read_csv(data_saving_file_path)
-                        if (not df_old.empty) and ("date" in df_old.columns) and (df_to_save["date"].iloc[0] in df_old["date"].values): return True
+                        if (not df_old.empty) and ("date" in df_old.columns) and (self.data_processed["date"].strftime('%Y-%m-%d %H:%M:%S') in df_old["date"].values): return True
                 except: pass
         else: return True # it means that the data does not need to be saved, so I consider it as if it were already saved
         
