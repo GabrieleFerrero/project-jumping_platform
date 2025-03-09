@@ -470,9 +470,9 @@ class DataRepresenter():
             "jump_time_AVG_value": 0.0,
             "first_touch_LX_value": 0.0,
             "first_touch_RX_value": 0.0,
-            "expressed_strength_LX_value": 0.0,
-            "expressed_strength_RX_value": 0.0,
-            "expressed_strength_AVG_value": 0.0
+            "jump_power_LX_value": 0.0,
+            "jump_power_RX_value": 0.0,
+            "jump_power_AVG_value": 0.0
         }
 
         return {"data":data, "state":{"value":False, "color":"black"}, "date":datetime.now()}
@@ -485,9 +485,9 @@ class DataRepresenter():
         label_indicator_jump_time_AVG.config(text=f"Jump time AVG: {round(data_processed["data"]["jump_time_AVG_value"], 5)} s", fg=data_processed["state"]["color"])
         label_indicator_first_touch_LX.config(text=f"First touch LX: {round(data_processed["data"]["first_touch_LX_value"], 5)} s", fg=data_processed["state"]["color"])
         label_indicator_first_touch_RX.config(text=f"First touch RX: {round(data_processed["data"]["first_touch_RX_value"], 5)} s", fg=data_processed["state"]["color"])
-        label_indicator_expressed_strength_LX.config(text=f"Expressed strength LX: {round(data_processed["data"]["expressed_strength_LX_value"], 3)} N", fg=data_processed["state"]["color"])
-        label_indicator_expressed_strength_RX.config(text=f"Expressed strength RX: {round(data_processed["data"]["expressed_strength_RX_value"], 3)} N", fg=data_processed["state"]["color"])
-        label_indicator_expressed_strength_AVG.config(text=f"Expressed strength AVG: {round(data_processed["data"]["expressed_strength_AVG_value"], 3)} N", fg=data_processed["state"]["color"])
+        label_indicator_jump_power_LX.config(text=f"Jump power LX: {round(data_processed["data"]["jump_power_LX_value"], 3)} N", fg=data_processed["state"]["color"])
+        label_indicator_jump_power_RX.config(text=f"Jump power RX: {round(data_processed["data"]["jump_power_RX_value"], 3)} N", fg=data_processed["state"]["color"])
+        label_indicator_jump_power_AVG.config(text=f"Jump power AVG: {round(data_processed["data"]["jump_power_AVG_value"], 3)} N", fg=data_processed["state"]["color"])
         root.update_idletasks()
 
     def data_processing(self):
@@ -524,10 +524,11 @@ class DataRepresenter():
 
                         data_processed["data"]["jump_height"]=((1/2)*acceleration_of_gravity*((data_processed["data"]["jump_time_AVG_value"]/2)**2))*100 # cm
 
-                    
-                    data_processed["data"]["expressed_strength_AVG_value"]=(data_processed["data"]["expressed_strength_LX_value"]+data_processed["data"]["expressed_strength_RX_value"])/2
+                        data_processed["data"]["jump_power_LX_value"] = (data_processed["data"]["mass"]*acceleration_of_gravity*data_processed["data"]["jump_height"])/(data_processed["data"]["jump_time_LX_value"]/2)
+                        data_processed["data"]["jump_power_RX_value"] = (data_processed["data"]["mass"]*acceleration_of_gravity*data_processed["data"]["jump_height"])/(data_processed["data"]["jump_time_RX_value"]/2)
+                        data_processed["data"]["jump_power_AVG_value"]=(data_processed["data"]["jump_power_LX_value"]+data_processed["data"]["jump_power_RX_value"])/2
 
-                    data_processed["state"]["value"]=True
+                        data_processed["state"]["value"]=True
 
         else:
             data_processed["state"]["color"]="red"
@@ -991,14 +992,14 @@ label_indicator_first_touch_LX.pack(side=tk.LEFT, padx=20)
 label_indicator_first_touch_RX = tk.Label(frame_indicator_first_touch, text=f"First touch RX: {0.0} s", font=("Arial", 12))
 label_indicator_first_touch_RX.pack(side=tk.LEFT, padx=20)
 
-frame_indicator_expressed_strength = tk.LabelFrame(root, text=f"Expressed strength", padx=10, pady=10)
-frame_indicator_expressed_strength.pack(pady=10, padx=10, fill="both")
-label_indicator_expressed_strength_LX = tk.Label(frame_indicator_expressed_strength, text=f"Expressed strength LX: {0.0} N", font=("Arial", 12))
-label_indicator_expressed_strength_LX.pack(side=tk.LEFT, padx=20)
-label_indicator_expressed_strength_RX = tk.Label(frame_indicator_expressed_strength, text=f"Expressed strength RX: {0.0} N", font=("Arial", 12))
-label_indicator_expressed_strength_RX.pack(side=tk.LEFT, padx=20)
-label_indicator_expressed_strength_AVG = tk.Label(frame_indicator_expressed_strength, text=f"Expressed strength AVG: {0.0} N", font=("Arial", 12))
-label_indicator_expressed_strength_AVG.pack(side=tk.LEFT, padx=20)
+frame_indicator_jump_power = tk.LabelFrame(root, text=f"Jump power", padx=10, pady=10)
+frame_indicator_jump_power.pack(pady=10, padx=10, fill="both")
+label_indicator_jump_power_LX = tk.Label(frame_indicator_jump_power, text=f"Jump power LX: {0.0} N", font=("Arial", 12))
+label_indicator_jump_power_LX.pack(side=tk.LEFT, padx=20)
+label_indicator_jump_power_RX = tk.Label(frame_indicator_jump_power, text=f"Jump power RX: {0.0} N", font=("Arial", 12))
+label_indicator_jump_power_RX.pack(side=tk.LEFT, padx=20)
+label_indicator_jump_power_AVG = tk.Label(frame_indicator_jump_power, text=f"Jump power AVG: {0.0} N", font=("Arial", 12))
+label_indicator_jump_power_AVG.pack(side=tk.LEFT, padx=20)
 
 # Chart section
 frame_chart = tk.Frame(root)
