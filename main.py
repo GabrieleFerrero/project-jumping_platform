@@ -528,7 +528,7 @@ class DataRepresenter():
                         data_processed["data"]["jump_power_RX_value"] = (data_processed["data"]["mass"]*acceleration_of_gravity*data_processed["data"]["jump_height"])/(data_processed["data"]["jump_time_RX_value"]/2)
                         data_processed["data"]["jump_power_AVG_value"]=(data_processed["data"]["jump_power_LX_value"]+data_processed["data"]["jump_power_RX_value"])/2
 
-                        data_processed["state"]["value"]=True
+                data_processed["state"]["value"]=True
 
         else:
             data_processed["state"]["color"]="red"
