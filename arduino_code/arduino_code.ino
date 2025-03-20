@@ -38,7 +38,7 @@ void setup() {
 
 void loop() {
   StaticJsonDocument<350> doc_in;
-  StaticJsonDocument<350> doc_out;
+  StaticJsonDocument<400> doc_out;
   DeserializationError error;
 
   
@@ -83,36 +83,48 @@ void loop() {
             int value = analogRead(pin);
             doc_out["value"] = value;
             doc_out["code"] = "OK";
+          }else if(doc_in["command"]=="get_info"){
+            JsonObject response = doc_out.createNestedObject("response");
+            JsonArray lc = response.createNestedArray("lc");
+            lc.add("LX");
+            lc.add("RX");
+            doc_out["code"] = "OK";
           }else if(doc_in["command"]=="get_data"){
+            JsonObject response = doc_out.createNestedObject("response");
+            JsonObject lc = response.createNestedObject("lc");
+
             float value_LX = 5;//get_load_cells_adc_value(0, 10);
             if (isnan(value_LX)){
-              doc_out["jpLX"] = nullptr;
+              lc["LX"] = nullptr;
             }else{
-              doc_out["jpLX"] = value_LX;
+              lc["LX"] = value_LX;
             }
             float value_RX = 5;//get_load_cells_adc_value(1, 10);
             if (isnan(value_RX)){
-              doc_out["jpRX"] = nullptr;
+              lc["RX"] = nullptr;
             }else{
-              doc_out["jpRX"] = value_RX;
+              lc["RX"] = value_RX;
             }
             doc_out["code"] = "OK";
           }else if(doc_in["command"]=="scale_tare"){
             load_cells_adc.sendDirectCommand(SELFCAL);
 
+            JsonObject response = doc_out.createNestedObject("response");
+            JsonObject lc = response.createNestedObject("lc");
+
             float value_LX = 5;//get_load_cells_adc_value(0, 200);
             if (isnan(value_LX)){
-              doc_out["jpLX"] = "ERROR";
+              lc["LX"] = "ERROR";
             }else{
               load_cells_tare[0]=value_LX;
-              doc_out["jpLX"] = "OK";
+              lc["LX"] = "OK";
             }
             float value_RX = 5;//get_load_cells_adc_value(1, 200);
             if (isnan(value_RX)){
-              doc_out["jpRX"] = "ERROR";
+              lc["RX"] = "ERROR";
             }else{
               load_cells_tare[1]=value_RX;
-              doc_out["jpRX"] = "OK";
+              lc["RX"] = "OK";
             }
             doc_out["code"] = "OK";
           }else if(doc_in["command"]=="is_alive"){

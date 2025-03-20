@@ -399,8 +399,9 @@ class DataRepresenter():
         if not self.fs_representation:
             data, empty = self.get_data()
             if self.representation and not empty:
-                error = not self.add_data(data)
+                error = not self.data_is_valid(data)
                 if not error:
+                    self.add_data(data)
                     #self.draw_chart()
                     if len(self.data_device["time"])<=self.number_of_samples_for_mass_calculation:
                         label_acquisition_status.config(text=f"Stay still! Mass calculation {int((len(self.data_device["time"])/self.number_of_samples_for_mass_calculation)*100)}%", fg="orange",  font=("Arial", 15))
@@ -439,20 +440,17 @@ class DataRepresenter():
     def value_initialization_data_device(self):
         data_device={
             "time":[],
-            "jpLX":[],
-            "jpRX":[]
+            "lc":{k: [] for k in lc_info}
         }
 
         return data_device
 
     def set_data_device(self, data_device):
-        line_jpLX.set_data(data_device["time"], data_device["jpLX"])
-        line_jpRX.set_data(data_device["time"], data_device["jpRX"])
-        ax_jpLX.relim()
-        ax_jpRX.relim()
-        ax_jpLX.autoscale_view()
-        ax_jpRX.autoscale_view()
-        canvas.draw()
+        for k in lc_info:
+            lines_jp[k].set_data(data_device["time"], data_device["lc"][k])
+            axes_jp[k].relim()
+            axes_jp[k].autoscale_view()
+            canvas_jp.draw()
 
     def show_default_data_device(self):
         data_device = self.value_initialization_data_device()
@@ -465,13 +463,10 @@ class DataRepresenter():
         data = {
             "mass": 0.0,
             "jump_height": 0.0,
-            "jump_time_LX_value": 0.0,
-            "jump_time_RX_value": 0.0,
+            "jump_time_value": {k: 0.0 for k in lc_info},
             "jump_time_AVG_value": 0.0,
-            "first_touch_LX_value": 0.0,
-            "first_touch_RX_value": 0.0,
-            "jump_power_LX_value": 0.0,
-            "jump_power_RX_value": 0.0,
+            "first_touch_value": {k: 0.0 for k in lc_info},
+            "jump_power_value": {k: 0.0 for k in lc_info},
             "jump_power_AVG_value": 0.0
         }
 
@@ -480,13 +475,17 @@ class DataRepresenter():
     def set_processed_data(self, data_processed):
         label_indicator_mass.config(text=f"Mass: {round(data_processed["data"]["mass"],2)} Kg", fg=data_processed["state"]["color"])
         label_indicator_jump_height.config(text=f"Jump height: {round(data_processed["data"]["jump_height"],2)} cm", fg=data_processed["state"]["color"])
-        label_indicator_jump_time_LX.config(text=f"Jump time LX: {round(data_processed["data"]["jump_time_LX_value"], 5)} s", fg=data_processed["state"]["color"])
-        label_indicator_jump_time_RX.config(text=f"Jump time RX: {round(data_processed["data"]["jump_time_RX_value"], 5)} s", fg=data_processed["state"]["color"])
+
+        for k in lc_info:
+            label_indicator_jump_time[k].config(text=f"Jump time {k}: {round(data_processed["data"]["jump_time_value"][k], 5)} s", fg=data_processed["state"]["color"])
         label_indicator_jump_time_AVG.config(text=f"Jump time AVG: {round(data_processed["data"]["jump_time_AVG_value"], 5)} s", fg=data_processed["state"]["color"])
-        label_indicator_first_touch_LX.config(text=f"First touch LX: {round(data_processed["data"]["first_touch_LX_value"], 5)} s", fg=data_processed["state"]["color"])
-        label_indicator_first_touch_RX.config(text=f"First touch RX: {round(data_processed["data"]["first_touch_RX_value"], 5)} s", fg=data_processed["state"]["color"])
-        label_indicator_jump_power_LX.config(text=f"Jump power LX: {round(data_processed["data"]["jump_power_LX_value"], 3)} N", fg=data_processed["state"]["color"])
-        label_indicator_jump_power_RX.config(text=f"Jump power RX: {round(data_processed["data"]["jump_power_RX_value"], 3)} N", fg=data_processed["state"]["color"])
+
+        for k in lc_info:
+            label_indicator_first_touch[k].config(text=f"First touch {k}: {round(data_processed["data"]["first_touch_value"][k], 5)} s", fg=data_processed["state"]["color"])
+
+        for k in lc_info:
+            label_indicator_jump_power[k].config(text=f"Jump power {k}: {round(data_processed["data"]["jump_power_value"][k], 3)} N", fg=data_processed["state"]["color"])
+
         label_indicator_jump_power_AVG.config(text=f"Jump power AVG: {round(data_processed["data"]["jump_power_AVG_value"], 3)} N", fg=data_processed["state"]["color"])
         root.update_idletasks()
 
@@ -494,41 +493,41 @@ class DataRepresenter():
         data_processed = self.value_initialization_data_processed()
         acceleration_of_gravity = 9.81
 
-        if self.data_device["time"]:
+        if self.data_device["time"] and self.data_device["lc"] and len(lc_info)>0:
             if len(self.data_device["time"])<self.number_of_samples_for_mass_calculation:
                 data_processed["state"]["color"]="red"
                 data_processed["data"]["mass"]=-1
             else:
+                
+                mass = {k: 0.0 for k in lc_info}
+                for k in lc_info:
+                    mass[k] = (sum(self.data_device["lc"][k][0:self.number_of_samples_for_mass_calculation])/self.number_of_samples_for_mass_calculation)/acceleration_of_gravity
+                data_processed["data"]["mass"] = sum(mass.values())
 
-                mass_LX = (sum(self.data_device["jpLX"][0:self.number_of_samples_for_mass_calculation])/self.number_of_samples_for_mass_calculation)/acceleration_of_gravity
-                mass_RX = (sum(self.data_device["jpRX"][0:self.number_of_samples_for_mass_calculation])/self.number_of_samples_for_mass_calculation)/acceleration_of_gravity
-                data_processed["data"]["mass"] = mass_LX+mass_RX
+                index_first_moment_jump = {k: 0.0 for k in lc_info}
+                index_last_moment_jump = {k: 0.0 for k in lc_info}
+                for k in lc_info:
+                    index_first_moment_jump[k] = next((i for i, strength_value in enumerate(self.data_device["lc"][k]) if strength_value==0), -1)
+                    index_last_moment_jump[k] = next((i for i, strength_value in enumerate(self.data_device["lc"][k][::-1]) if strength_value==0), -1)
 
+                if -1 not in index_first_moment_jump.values() and -1 not in index_last_moment_jump.values():
+                    for k in lc_info: 
+                        data_processed["data"]["first_touch_value"][k]=self.data_device["time"][index_last_moment_jump[k]]
 
-                first_touch_LX_index_start = next((i for i, strength_value in enumerate(self.data_device["jpLX"]) if strength_value!=0), None)
-                first_touch_RX_index_start = next((i for i, strength_value in enumerate(self.data_device["jpRX"]) if strength_value!=0), None)
-                first_touch_LX_index_end = next((i for i, strength_value in enumerate(self.data_device["jpLX"][::-1]) if strength_value!=0), None)
-                first_touch_RX_index_end = next((i for i, strength_value in enumerate(self.data_device["jpRX"][::-1]) if strength_value!=0), None)
+                    for k in lc_info: 
+                        data_processed["data"]["jump_time_value"][k]=data_processed["data"]["first_touch_value"][k]-self.data_device["time"][index_first_moment_jump[k]]
 
-                if first_touch_RX_index_start is not None and first_touch_LX_index_start is not None:
-                    first_leave_LX_value=self.data_device["time"][first_touch_LX_index_start]
-                    first_leave_RX_value=self.data_device["time"][first_touch_RX_index_start]
+                    data_processed["data"]["jump_time_AVG_value"]=sum(data_processed["data"]["jump_time_value"].values())/len(data_processed["data"]["jump_time_value"])
 
-                    if first_touch_RX_index_end is not None and first_touch_LX_index_end is not None:
-                        data_processed["data"]["first_touch_LX_value"]=self.data_device["time"][first_touch_LX_index_end]
-                        data_processed["data"]["first_touch_RX_value"]=self.data_device["time"][first_touch_RX_index_end]
+                    data_processed["data"]["jump_height"]=((1/2)*acceleration_of_gravity*((data_processed["data"]["jump_time_AVG_value"]/2)**2))*100 # cm
 
-                        data_processed["data"]["jump_time_LX_value"]=data_processed["data"]["first_touch_LX_value"]-first_leave_LX_value
-                        data_processed["data"]["jump_time_RX_value"]=data_processed["data"]["first_touch_RX_value"]-first_leave_RX_value
-                        data_processed["data"]["jump_time_AVG_value"]=(data_processed["data"]["jump_time_LX_value"]+data_processed["data"]["jump_time_RX_value"])/2
-
-                        data_processed["data"]["jump_height"]=((1/2)*acceleration_of_gravity*((data_processed["data"]["jump_time_AVG_value"]/2)**2))*100 # cm
-
-                        data_processed["data"]["jump_power_LX_value"] = (data_processed["data"]["mass"]*acceleration_of_gravity*data_processed["data"]["jump_height"])/(data_processed["data"]["jump_time_LX_value"]/2)
-                        data_processed["data"]["jump_power_RX_value"] = (data_processed["data"]["mass"]*acceleration_of_gravity*data_processed["data"]["jump_height"])/(data_processed["data"]["jump_time_RX_value"]/2)
-                        data_processed["data"]["jump_power_AVG_value"]=(data_processed["data"]["jump_power_LX_value"]+data_processed["data"]["jump_power_RX_value"])/2
-
+                    for k in lc_info: 
+                        data_processed["data"]["jump_power_value"][k] = (data_processed["data"]["mass"]*acceleration_of_gravity*data_processed["data"]["jump_height"])/(data_processed["data"]["jump_time_value"][k]/2)
+                    
+                    data_processed["data"]["jump_power_AVG_value"]=sum(data_processed["data"]["jump_power_value"].values())/len(data_processed["data"]["jump_power_value"])
+                
                 data_processed["state"]["value"]=True
+
 
         else:
             data_processed["state"]["color"]="red"
@@ -645,15 +644,23 @@ class DataRepresenter():
     def get_data(self):
         try: return (data_queue.get(timeout=self.timeout_empty_queue), False)
         except: return (None, True)
-    
-    def add_data(self, data):
-        if data is not None and data[0] is not None:
-            if data[0]["code"]=="OK" and data[0]["jpLX"] is not None and data[0]["jpRX"] is not None:
-                self.data_device["time"].append(data[1])
-                self.data_device["jpLX"].append(data[0]["jpLX"])
-                self.data_device["jpRX"].append(data[0]["jpRX"])
+
+    def data_is_valid(self, data):
+        if (data is not None
+            and data[0] is not None 
+            and "lc" in data[0] 
+            and len(data[0]["lc"])==len(lc_info)): 
             return True
         else: return False
+    
+    def add_data(self, data):
+        data_lc = data[0]["lc"]
+        if data_lc and (None not in data_lc):
+            self.data_device["time"].append(data[1])
+            for k in lc_info:
+                self.data_device["lc"][k].append(data_lc[k])
+            return True
+        return False
             
     
 
@@ -720,9 +727,11 @@ class DataAcquirer(threading.Thread):
     def get_data(self):
         message_to_send_to_device = {"command":"get_data"}
         message_device = self.device.write_and_read(message_to_send_to_device)
-        if message_device.get_code()==Code('OK'): 
-            #print(message_device.get_response())
-            return message_device.get_response()
+        code = message_device.get_code()
+        response = message_device.get_response()
+        if code==Code('OK'):
+            if response["code"]=="OK": return response["response"]
+            else: return []
         else: return None
 
 
@@ -762,7 +771,11 @@ def connect_device(info_device):
     if check_device_connection():
         label_acquisition_status.config(text="Acquisition status: Stop", font=("Arial", 15), fg="black")
         root.update_idletasks()
+        set_number_load_cells()
+
         command_button_scale_tare()
+        create_indicator()
+        create_chart()
     else:
         disconnect_device()
         func_Focus_combobox_menu_device(None)
@@ -812,8 +825,7 @@ def command_button_stop():
     data_representer.stop_representation()
 
 def func_WM_DELETE_WINDOW():
-    data_representer.stop_representation_activity()
-    data_acquirer.stop_acquisition_activity()
+    data_representer.force_stop_representation()
 
     finish=False
     if not data_representer.data_is_saved():
@@ -826,6 +838,8 @@ def func_WM_DELETE_WINDOW():
         finish=True
     
     if finish:
+        data_representer.stop_representation_activity()
+        data_acquirer.stop_acquisition_activity()
         data_acquirer.join()
         disconnect_device()
         root.quit()
@@ -838,15 +852,11 @@ def command_button_scale_tare():
         message_to_send_to_device = {"command":"scale_tare"}
         message_device = arduino.write_and_read(message_to_send_to_device)
         if message_device.get_code()==Code('OK') and message_device.get_response() is not None: 
-            result = message_device.get_response()
-            if result["jpLX"]=="OK" and result["jpRX"]=="OK": 
-                label_scale_tare.config(text="Calibrated", fg="green")
-            elif result["jpLX"]=="OK" and result["jpRX"]=="ERROR":
-                label_scale_tare.config(text="LX:yes | RX:no", fg="purple")
-            elif result["jpLX"]=="ERROR" and result["jpRX"]=="OK":
-                label_scale_tare.config(text="LX:no | RX:yes", fg="purple")
-            elif result["jpLX"]=="ERROR" and result["jpRX"]=="ERROR":
-                label_scale_tare.config(text="Not calibrated!", fg="red")
+            result = message_device.get_response()["response"]["lc"]
+            result_string = ""
+            for k in lc_info:
+                result_string += f"{k}: {result[k]} | "
+            label_scale_tare.config(text=result_string[:-3], fg="black")
         else: 
             label_scale_tare.config(text="Not calibrated!", fg="red")
         root.update_idletasks() 
@@ -900,18 +910,104 @@ def show_warning(title, message):
     root.withdraw()
     messagebox.showwarning(title, message)
 
+
+def create_chart():
+    for widget in frame_chart.winfo_children(): widget.destroy()
+
+    if len(lc_info)>0:
+        global axes_jp, lines_jp, canvas_jp
+        fig, axes_jp = plt.subplots(len(lc_info), 1, figsize=(5, 2 * len(lc_info)))
+        fig.tight_layout()  # Improve the layout
+        fig.subplots_adjust(hspace=0.50)  # Increase vertical space between charts
+
+        if len(lc_info) == 1:
+            axes_jp = [axes_jp]  # If there is only one graph, convert it to a list for consistency
+
+        axes_jp = {k: ax for ax, k in zip(axes_jp, lc_info)}
+
+        # Creating empty lines
+        lines_jp = {k: axes_jp[k].plot([], [])[0] for k in lc_info}
+
+        # Axis configuration
+        for k in lc_info:
+            axes_jp[k].set_title(f"Load Cell {k}")
+            axes_jp[k].set_xlabel("Time (s)")
+            axes_jp[k].set_ylabel("Newton (N)")
+
+
+        # Tkinter Integration
+        canvas_jp = FigureCanvasTkAgg(fig, master=frame_chart)
+        canvas_jp.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas_jp.draw()
+
+        # Adding the toolbar above the chart
+        toolbar = NavigationToolbar2Tk(canvas_jp, frame_chart)
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+        canvas_jp.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    root.update_idletasks()
+    root.minsize(root.winfo_width(), root.winfo_height())
+
+
+def create_indicator():
+    for widget in frame_indicator_jump_time.winfo_children(): widget.destroy()
+    for widget in frame_indicator_first_touch.winfo_children(): widget.destroy()
+    for widget in frame_indicator_jump_power.winfo_children(): widget.destroy()
+
+    global label_indicator_first_touch, label_indicator_jump_power, label_indicator_jump_time
+    global label_indicator_jump_time_AVG, label_indicator_jump_power_AVG
+
+    label_indicator_jump_time_AVG = tk.Label(frame_indicator_jump_time, text=f"Jump time AVG: {0.0} s", font=("Arial", 12))
+    label_indicator_jump_time_AVG.pack(side=tk.LEFT, padx=20)
+
+    label_indicator_jump_time = {k: tk.Label(frame_indicator_jump_time, text=f"Jump time {k}: {0.0} s", font=("Arial", 12)) for k in lc_info}
+    for k in lc_info:
+        label_indicator_jump_time[k].pack(side=tk.LEFT, padx=20)
+
+    label_indicator_first_touch = {k: tk.Label(frame_indicator_first_touch, text=f"First touch {k}: {0.0} s", font=("Arial", 12)) for k in lc_info}
+    for k in lc_info:
+        label_indicator_first_touch[k].pack(side=tk.LEFT, padx=20)
+
+    label_indicator_jump_power_AVG = tk.Label(frame_indicator_jump_power, text=f"Jump power AVG: {0.0} N", font=("Arial", 12))
+    label_indicator_jump_power_AVG.pack(side=tk.LEFT, padx=20)
+
+    label_indicator_jump_power = {k: tk.Label(frame_indicator_jump_power, text=f"Jump power {k}: {0.0} N", font=("Arial", 12)) for k in lc_info}
+    for k in lc_info:
+        label_indicator_jump_power[k].pack(side=tk.LEFT, padx=20)
+    
+ 
+    root.update_idletasks()
+    root.minsize(root.winfo_width(), root.winfo_height())
+
+
+def set_number_load_cells():
+    global lc_info
+    message_to_send_to_device = {"command":"get_info"}
+    message_device = arduino.write_and_read(message_to_send_to_device)
+    code = message_device.get_code()
+    response = message_device.get_response()
+    if code==Code('OK'):
+        if response["code"]=="OK": lc_info = response["response"]["lc"]
+        else: lc_info = []
+    else: lc_info=[]
+    
+
 # ----------------------
+
+data_saving_file_path = ""
+lc_info = []
 
 root = tk.Tk()
 arduino = Arduino(device_timeout=2, baudrate=460800)
 data_queue=queue.Queue()
 data_acquirer = DataAcquirer(arduino, data_queue)
 data_representer = DataRepresenter()
-data_saving_file_path = ""
+
 
 # Creation of main window
 root.title("Jumping platform")
-root.geometry("1000x1000")
+#root.geometry("1000x1000")
+
 root.protocol("WM_DELETE_WINDOW", func_WM_DELETE_WINDOW)
 
 menu_bar = tk.Menu(root)
@@ -923,8 +1019,8 @@ root.config(menu=menu_bar)
 
 frame_open_file = tk.Frame(root)
 frame_open_file.pack(fill="x")
-label_open_file = tk.Label(frame_open_file, text=f"Open file: {data_saving_file_path}", padx=10)
-label_open_file.pack(side=tk.LEFT, padx=10)
+label_open_file = tk.Label(frame_open_file, text=f"Open file: {data_saving_file_path}")
+label_open_file.pack(side=tk.LEFT)
 
 # Device Selection and Status
 frame_menu_device = tk.Frame(root)
@@ -967,73 +1063,39 @@ button_save.pack(side=tk.LEFT, padx=10)
 frame_acquisition_status = tk.LabelFrame(root)
 frame_acquisition_status.pack(pady=10)
 label_acquisition_status = tk.Label(frame_acquisition_status, text=f"Acquisition status: Stop", font=("Arial", 15))
-label_acquisition_status.pack(side=tk.LEFT, padx=20)
+label_acquisition_status.pack(side=tk.LEFT)
 
 frame_indicator_general_data = tk.LabelFrame(root, text=f"General data", padx=10, pady=10)
-frame_indicator_general_data.pack(pady=10, padx=10, fill="both")
+frame_indicator_general_data.pack(fill="both")
 label_indicator_mass = tk.Label(frame_indicator_general_data, text=f"Mass: {0.0} Kg", font=("Arial", 12))
 label_indicator_mass.pack(side=tk.LEFT, padx=20)
 label_indicator_jump_height = tk.Label(frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
 label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
 
 frame_indicator_jump_time = tk.LabelFrame(root, text=f"Jump time", padx=10, pady=10)
-frame_indicator_jump_time.pack(pady=10, padx=10, fill="both")
-label_indicator_jump_time_LX = tk.Label(frame_indicator_jump_time, text=f"Jump time LX: {0.0} s", font=("Arial", 12))
-label_indicator_jump_time_LX.pack(side=tk.LEFT, padx=20)
-label_indicator_jump_time_RX = tk.Label(frame_indicator_jump_time, text=f"Jump time RX: {0.0} s", font=("Arial", 12))
-label_indicator_jump_time_RX.pack(side=tk.LEFT, padx=20)
-label_indicator_jump_time_AVG = tk.Label(frame_indicator_jump_time, text=f"Jump time AVG: {0.0} s", font=("Arial", 12))
-label_indicator_jump_time_AVG.pack(side=tk.LEFT, padx=20)
+frame_indicator_jump_time.pack(fill="both")
 
 frame_indicator_first_touch = tk.LabelFrame(root, text=f"First touch", padx=10, pady=10)
-frame_indicator_first_touch.pack(pady=10, padx=10, fill="both")
-label_indicator_first_touch_LX = tk.Label(frame_indicator_first_touch, text=f"First touch LX: {0.0} s", font=("Arial", 12))
-label_indicator_first_touch_LX.pack(side=tk.LEFT, padx=20)
-label_indicator_first_touch_RX = tk.Label(frame_indicator_first_touch, text=f"First touch RX: {0.0} s", font=("Arial", 12))
-label_indicator_first_touch_RX.pack(side=tk.LEFT, padx=20)
+frame_indicator_first_touch.pack(fill="both")
 
 frame_indicator_jump_power = tk.LabelFrame(root, text=f"Jump power", padx=10, pady=10)
-frame_indicator_jump_power.pack(pady=10, padx=10, fill="both")
-label_indicator_jump_power_LX = tk.Label(frame_indicator_jump_power, text=f"Jump power LX: {0.0} N", font=("Arial", 12))
-label_indicator_jump_power_LX.pack(side=tk.LEFT, padx=20)
-label_indicator_jump_power_RX = tk.Label(frame_indicator_jump_power, text=f"Jump power RX: {0.0} N", font=("Arial", 12))
-label_indicator_jump_power_RX.pack(side=tk.LEFT, padx=20)
-label_indicator_jump_power_AVG = tk.Label(frame_indicator_jump_power, text=f"Jump power AVG: {0.0} N", font=("Arial", 12))
-label_indicator_jump_power_AVG.pack(side=tk.LEFT, padx=20)
+frame_indicator_jump_power.pack(fill="both")
+
+create_indicator()
 
 # Chart section
+
 frame_chart = tk.Frame(root)
 frame_chart.pack(fill=tk.BOTH, expand=True)
 
-# Creating the figure and axes
-fig, (ax_jpLX, ax_jpRX) = plt.subplots(2, 1, figsize=(5, 3))
-fig.tight_layout()  # Improve the layout
-fig.subplots_adjust(hspace=0.5)  # Increase vertical space between charts
-
-# Creation of empty lines
-line_jpLX, = ax_jpLX.plot([], [])
-line_jpRX, = ax_jpRX.plot([], [])
-
-# Axis configuration
-ax_jpLX.set_title("Left Footrest")
-ax_jpRX.set_title("Right Footrest")
-ax_jpLX.set_xlabel("Time (s)")
-ax_jpRX.set_xlabel("Time (s)")
-ax_jpLX.set_ylabel("Newton (N)")
-ax_jpRX.set_ylabel("Newton (N)")
-
-# Tkinter Integration
-canvas = FigureCanvasTkAgg(fig, master=frame_chart)
-canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-canvas.draw()
-
-# Adding the toolbar above the chart
-toolbar = NavigationToolbar2Tk(canvas, frame_chart)
-toolbar.pack(side=tk.TOP, fill=tk.X)
-canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+create_chart()
 
 # Starting data acquirer
 data_acquirer.start()
+
+# Calculate and set the minimum size automatically
+root.update_idletasks()  # Force Tkinter to calculate minimum size
+root.minsize(root.winfo_width(), root.winfo_height())
 
 # Starting root mainloop
 root.mainloop()
