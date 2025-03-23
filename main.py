@@ -13,6 +13,7 @@ import threading
 import time
 import queue
 import pandas as pd
+import numpy as np
 
 
 
@@ -492,6 +493,7 @@ class DataRepresenter():
     def data_processing(self):
         data_processed = self.value_initialization_data_processed()
         acceleration_of_gravity = 9.81
+        theshold_jump = 60
 
         if self.data_device["time"] and self.data_device["lc"] and len(lc_info)>0:
             if len(self.data_device["time"])<self.number_of_samples_for_mass_calculation:
@@ -506,27 +508,55 @@ class DataRepresenter():
 
                 index_first_moment_jump = {k: 0.0 for k in lc_info}
                 index_last_moment_jump = {k: 0.0 for k in lc_info}
+
+
+                error=False
                 for k in lc_info:
-                    index_first_moment_jump[k] = next((i for i, strength_value in enumerate(self.data_device["lc"][k]) if strength_value==0), -1)
-                    index_last_moment_jump[k] = next((i for i, strength_value in enumerate(self.data_device["lc"][k][::-1]) if strength_value==0), -1)
 
-                if -1 not in index_first_moment_jump.values() and -1 not in index_last_moment_jump.values():
-                    for k in lc_info: 
-                        data_processed["data"]["first_touch_value"][k]=self.data_device["time"][index_last_moment_jump[k]]
+                    #print(self.data_device["lc"][k])
 
-                    for k in lc_info: 
-                        data_processed["data"]["jump_time_value"][k]=data_processed["data"]["first_touch_value"][k]-self.data_device["time"][index_first_moment_jump[k]]
-
-                    data_processed["data"]["jump_time_AVG_value"]=sum(data_processed["data"]["jump_time_value"].values())/len(data_processed["data"]["jump_time_value"])
-
-                    data_processed["data"]["jump_height"]=((1/2)*acceleration_of_gravity*((data_processed["data"]["jump_time_AVG_value"]/2)**2))*100 # cm
-
-                    for k in lc_info: 
-                        data_processed["data"]["jump_power_value"][k] = (data_processed["data"]["mass"]*acceleration_of_gravity*data_processed["data"]["jump_height"])/(data_processed["data"]["jump_time_value"][k]/2)
+                    mask = np.array([(val >= -theshold_jump and val <= theshold_jump) for val in self.data_device["lc"][k]])
+                    indices = np.where(mask)[0]
+                    intervals = []
+                    if len(indices) > 0:
+                        start = indices[0]
+                        for i in range(1, len(indices)):
+                            if indices[i] != indices[i - 1] + 1: 
+                                intervals.append((start, indices[i - 1]))
+                                start = indices[i]
+                        intervals.append((start, indices[-1]))
                     
-                    data_processed["data"]["jump_power_AVG_value"]=sum(data_processed["data"]["jump_power_value"].values())/len(data_processed["data"]["jump_power_value"])
+                    #print(intervals)
+
+                    if len(intervals)>0:
+                        index_first_moment_jump[k] = intervals[0][0]
+                        index_last_moment_jump[k] = intervals[0][1]
+                    else:
+                        error=True
+                        break
+
+
+                if not error:
+                    if -1 not in index_first_moment_jump.values() and -1 not in index_last_moment_jump.values():
+                        for k in lc_info: 
+                            data_processed["data"]["first_touch_value"][k]=self.data_device["time"][index_last_moment_jump[k]]
+
+                        for k in lc_info: 
+                            data_processed["data"]["jump_time_value"][k]=data_processed["data"]["first_touch_value"][k]-self.data_device["time"][index_first_moment_jump[k]]
+
+                        data_processed["data"]["jump_time_AVG_value"]=sum(data_processed["data"]["jump_time_value"].values())/len(data_processed["data"]["jump_time_value"])
+
+                        data_processed["data"]["jump_height"]=((1/2)*acceleration_of_gravity*((data_processed["data"]["jump_time_AVG_value"]/2)**2))*100 # cm
+
+                        for k in lc_info: 
+                            data_processed["data"]["jump_power_value"][k] = (data_processed["data"]["mass"]*acceleration_of_gravity*data_processed["data"]["jump_height"])/(data_processed["data"]["jump_time_value"][k]/2)
+                        
+                        data_processed["data"]["jump_power_AVG_value"]=sum(data_processed["data"]["jump_power_value"].values())/len(data_processed["data"]["jump_power_value"])
+                    
+                    data_processed["state"]["value"]=True
                 
-                data_processed["state"]["value"]=True
+                else:
+                    data_processed["state"]["color"]="red"
 
 
         else:
