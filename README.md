@@ -32,8 +32,8 @@ The system is built using the following components:
 | DOUT (MISO) | GPIO19    |
 | SCLK        | GPIO18    |
 | CS          | GPIO5     |
-| DRDY        | GPIO4     |
-| RESET       | GPIO2     |
+| DRDY        | GPI16     |
+| POWN        | 5V        |
 
 ### Load Cell to ADS1256
 
@@ -47,7 +47,6 @@ The YZC-516C load cell has four wires:
 Connections:
 
 - **Cell 1**: White to AIN0, Green to AIN1 (Differential Mode)
-- **Cell 2**: White to AIN2, Green to AIN3 (Differential Mode)
 
 ## Driver Installation
 
