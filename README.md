@@ -32,7 +32,7 @@ The system is built using the following components:
 | DOUT (MISO) | GPIO19    |
 | SCLK        | GPIO18    |
 | CS          | GPIO5     |
-| DRDY        | GPI16     |
+| DRDY        | GPIO16    |
 | POWN        | 5V        |
 
 ### Load Cell to ADS1256
