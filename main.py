@@ -475,7 +475,7 @@ class DataRepresenter():
 
     def set_processed_data(self, data_processed):
         label_indicator_mass.config(text=f"Mass: {round(data_processed["data"]["mass"],2)} Kg", fg=data_processed["state"]["color"])
-        label_indicator_jump_height.config(text=f"Jump height: {round(data_processed["data"]["jump_height"],2)} cm", fg=data_processed["state"]["color"])
+        label_indicator_jump_height.config(text=f"Jump height: {round(data_processed["data"]["jump_height"]*100,2)} cm", fg=data_processed["state"]["color"])
 
         for k in lc_info:
             label_indicator_jump_time[k].config(text=f"Jump time {k}: {round(data_processed["data"]["jump_time_value"][k], 5)} s", fg=data_processed["state"]["color"])
@@ -546,7 +546,7 @@ class DataRepresenter():
 
                         data_processed["data"]["jump_time_AVG_value"]=sum(data_processed["data"]["jump_time_value"].values())/len(data_processed["data"]["jump_time_value"])
 
-                        data_processed["data"]["jump_height"]=((1/2)*acceleration_of_gravity*((data_processed["data"]["jump_time_AVG_value"]/2)**2))*100 # cm
+                        data_processed["data"]["jump_height"]=(1/2)*acceleration_of_gravity*((data_processed["data"]["jump_time_AVG_value"]/2)**2)
 
                         for k in lc_info: 
                             data_processed["data"]["jump_power_value"][k] = (data_processed["data"]["mass"]*acceleration_of_gravity*data_processed["data"]["jump_height"])/(data_processed["data"]["jump_time_value"][k]/2)
