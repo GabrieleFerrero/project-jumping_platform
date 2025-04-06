@@ -14,12 +14,17 @@ import time
 import queue
 import pandas as pd
 import numpy as np
-
+from collections import deque
+from functools import partial
 
 
 
 class TimeoutException(Exception):
     """Custom exception for timeout"""
+    pass
+
+class ArduinoCommunicationException(Exception):
+    """Custom exception for Arduino communication"""
     pass
 
 
@@ -166,188 +171,96 @@ class IODevice(ABC):
     @abstractmethod
     def _reset_buffer(self):
         pass
-    
+
+    def set_info_device(self, info_device):
+        self.info_device=info_device    
 
     def reset_buffer(self):
         with self.lock_IO:
-            message = Message()
-            message.set_action(f"reset_buffer [{self.info_device}]")
-
-            try: 
-                self.function_execution_with_timeout(self.device_timeout, self._reset_buffer)
-                message.set_code(Code("OK"))
-                message.set_code_description("Buffer empty")
-            except Exception as e:
-                message.set_code(Code("ERROR"))
-                message.set_code_description(str(e))
-
-            return message
-
+            self.function_execution_with_timeout(self.device_timeout, self._reset_buffer)
 
     def check_connection(self):
         with self.lock_IO:
-            if self.device_connection==None: return False
-            else: 
-                try: return self.function_execution_with_timeout(self.device_timeout, self._check_connection)
-                except Exception as e: 
-                    #print(f"{e}")
-                    return False
-
+            try: return self.function_execution_with_timeout(self.device_timeout, self._check_connection)
+            except: return False
     
     def close_connection(self):
         with self.lock_IO:
-            message = Message()
-            message.set_action(f"close_connection [{self.info_device}]")
-
-            
             try: self.function_execution_with_timeout(self.device_timeout, self._close_connection)
             except: pass
             self.device_connection = None
-
-            message.set_code(Code("OK"))
-            message.set_code_description("Connection closed")
-
-            return message
     
     def open_connection(self):
         with self.lock_IO:
-            message = Message()
-            message.set_action(f"open_connection [{self.info_device}]")
-
-            message.add_recalled_actions(self.close_connection())
-
-            if self.info_device:
-                try:
-                    self.device_connection = self.function_execution_with_timeout(self.device_timeout, self._open_connection)
-                    message.add_recalled_actions(self.reset_buffer())
-
-                    if self.check_connection():
-                        message.set_code(Code("OK"))
-                    else:
-                        message.set_code(Code("ERROR"))
-                        message.set_code_description("Connection failed")
-                        
-                except TimeoutException as e:
-                    message.set_code(Code("ERROR"))
-                    message.set_code_description("Timeout Error")
-                except Exception as e:
-                    message.set_code(Code("ERROR"))
-                    message.set_code_description(str(e))
-            else:
-                message.set_code(Code("ERROR"))
-                message.set_code_description("info_device is empty")
-
-            return message
-    
-
+            self.close_connection()
+            self.device_connection = self.function_execution_with_timeout(self.device_timeout, self._open_connection)
+            self.reset_buffer()
     
     def read(self):
         with self.lock_IO:
-            message = Message()
-            message.set_action(f"read [{self.info_device}]")
-
-            try:
-                result = self.function_execution_with_timeout(self.device_timeout, self._read)
-                message.set_code(Code("OK"))
-                message.set_response(result)
-            except TimeoutException as e:
-                message.set_code(Code("ERROR"))
-                message.set_code_description("Timeout Error")
-                message.set_response(None)
-            except Exception as e:
-                message.set_code(Code("ERROR"))
-                message.set_code_description(f"{e}")
-                message.set_response(None)
-
-            return message
-
+            return self.function_execution_with_timeout(self.device_timeout, self._read)
     
     def write(self, data):
         with self.lock_IO:
-            message = Message()
-            message.set_action(f"write [{self.info_device}]")
-
-            try:
-                result = self.function_execution_with_timeout(self.device_timeout, self._write, data)
-                message.set_code(Code("OK"))
-                message.set_response(result)
-            except TimeoutException as e:
-                message.set_code(Code("ERROR"))
-                message.set_code_description("Timeout Error")
-            except Exception as e:
-                message.set_code(Code("ERROR"))
-                message.set_code_description(f"{e}")
-
-            return message
+            self.function_execution_with_timeout(self.device_timeout, self._write, data)
     
     def write_and_read(self, data):
         with self.lock_IO:
-            message = Message()
-            message.set_action(f"write_and_read [{self.info_device}]")
-            
-            message_send = self.write(data)
-            message.add_recalled_actions(message_send)
-            if message_send.get_code()==Code('OK'):
-                message_read = self.read()
-                message.add_recalled_actions(message_read)
-                if message_read.get_code()==Code('OK'):
-                    message.set_code(Code("OK"))
-                    message.set_response(message_read.get_response())
-                else:
-                    message.set_code(Code("ERROR"))
-                    message.set_response(None)
-            else:
-                message.set_code(Code("ERROR"))
-                message.set_response(None)
+            self.write(data)
+            return self.read()
 
-            return message
-    
 
 class USBIODevice(IODevice):
     pass
     
 
 class Arduino(USBIODevice):
-    def __init__(self, info_device={}, device_timeout=5, baudrate=115200):
+    def __init__(self, info_device={}, device_timeout=5):
         super().__init__(info_device, device_timeout)
-
-        self.baudrate=baudrate
-
     
     def _reset_buffer(self):
-        self.device_connection.reset_input_buffer() # empty the buffer
+        if not (isinstance(self.device_connection, serial.Serial)):
+            raise ValueError("Invalid connection")
+        
+        self.device_connection.reset_input_buffer()
 
     def _check_connection(self):
+        if not (isinstance(self.device_connection, serial.Serial)):
+            raise ValueError("Invalid connection")
+        
         if self.device_connection.is_open:
-            message_to_send_to_arduino = {"command":"is_alive"}
-            self._write(message_to_send_to_arduino)
+            self._write({"command":"is_alive"})
             message_arduino_read = self._read()
             if message_arduino_read is not None:
-                if message_arduino_read["code"]=="OK":
-                    return True
-                else:
-                    return False
-            else:
-                False
-        else:
-            return False
+                if message_arduino_read["code"]=="OK": return True
+        return False
     
     def _close_connection(self):
+        if not (isinstance(self.device_connection, serial.Serial)):
+            raise ValueError("Invalid connection")
+        
         self.device_connection.close()
     
     def _open_connection(self):
-        if "port" in self.info_device and self.info_device["port"] and self.baudrate>0:
-            device_connection=serial.Serial(port=self.info_device["port"], baudrate=self.baudrate, timeout=self.device_timeout+1)
-            time.sleep(1)
-            return device_connection
-        else:
-            return None
+        if not (isinstance(self.info_device, dict)
+            and "port" in self.info_device.keys()
+            and self.info_device["port"]
+            and "baudrate" in self.info_device.keys()
+            and isinstance(self.info_device["baudrate"], int)
+            and self.info_device["baudrate"] > 0
+            ):
+            raise ValueError("Incorrect parameters")
+
+        device_connection=serial.Serial(port=self.info_device["port"], baudrate=self.info_device["baudrate"], timeout=self.device_timeout+1)
+        time.sleep(1)
+        return device_connection
 
     
     def _read(self):
-
+        if not (isinstance(self.device_connection, serial.Serial)):
+            raise ValueError("Invalid connection")
+        
         response=""
-
         exit_while=False
         while exit_while==False:
             char=self.device_connection.read(size=1).decode(encoding='utf-8')
@@ -358,164 +271,191 @@ class Arduino(USBIODevice):
                 elif char=='\n': pass
                 else: response += char
             else:
-                exit_while=True
-                response=None
+                raise ArduinoCommunicationException("Timeout expired while waiting for data")
 
-        #print(response)
-        if response is not None:
-            try: 
-                #print(json.loads(response))
-                return json.loads(response) #.strip('\n\r')
-            except: return None
-        else: 
-            return None
+        if response: 
+            result = json.loads(response)
+            if not (result["code"] == "OK"): raise ArduinoCommunicationException("Bad json")
+            return result["response"]
+        else: return json.loads("{}")
     
     def _write(self, data):
+        if not (isinstance(self.device_connection, serial.Serial)):
+            raise ValueError("Invalid connection")
+        if not (isinstance(data, dict)):
+            raise ValueError("Incorrect parameters")
+        
         self.device_connection.write(f"?{json.dumps(data)}!".encode())
-        #print(f"?{json.dumps(data)}!")
 
 
-class DataRepresenter():
+
+
+
+
+class DataProcessor():
     def __init__(self):
 
         self.after_id=None
-
-        self.data_device = self.value_initialization_data_device()
-        self.data_processed = self.value_initialization_data_processed()
-
+        self.raw_data = None
+        self.jump_data={
+            "mass": 0.0,
+            "acceleration_of_gravity": 9.81
+        }
         self.fs_representation=True # force stop representation
-        self.representation=False        
+        self.representation=False 
+    
+        self.time_sleep=10 # ms (milliseconds)
+        self.max_number_of_samples = 50000
 
-        self.number_of_samples_for_mass_calculation=200
-
-        self.timeout_empty_queue=1 # s (seconds)
-        self.time_sleep=1 # ms (milliseconds)
-
+        self.initialization_raw_data()
         self.force_stop_representation()
 
 
-    
-    def run(self):
-        error=False
+    def run(self, func1, args1, func2, args2):
         if not self.fs_representation:
-            data, empty = self.get_data()
-            if self.representation and not empty:
-                error = not self.data_is_valid(data)
-                if not error:
+            try:
+                data = data_dq.popleft()
+                if data is not None: 
                     self.add_data(data)
-                    #self.draw_chart()
-                    if len(self.data_device["time"])<=self.number_of_samples_for_mass_calculation:
-                        label_acquisition_status.config(text=f"Stay still! Mass calculation {int((len(self.data_device["time"])/self.number_of_samples_for_mass_calculation)*100)}%", fg="orange",  font=("Arial", 15))
-                        root.update_idletasks()
-                    else:
-                        label_acquisition_status.config(text=f"Jump!", fg="green",  font=("Arial", 15))
-                        root.update_idletasks() 
-            elif not self.representation and not empty:
-                error = not self.add_data(data)
-                label_acquisition_status.config(text="Analysis in progress...", font=("Arial", 15), fg="purple")
-                root.update_idletasks()
-            elif self.representation and empty:
-                label_acquisition_status.config(text="Waiting for data...", font=("Arial", 15), fg="blue")
-                root.update_idletasks()
-            elif not self.representation and empty:
-                label_acquisition_status.config(text="Acquisition status: Stop", font=("Arial", 15), fg="black")
-                root.update_idletasks()
+                    if self.representation:
+                        smart_update_label(label_status_acquisition, "Acquisition in progress...", "green")
+                    elif not self.representation:
+                        smart_update_label(label_status_acquisition, "Saving the last samples...", "orange")
+                    func1(*args1)
+                else: self.analysis_error()
+            except IndexError: # deque is empty
+                if self.representation:
+                    smart_update_label(label_status_acquisition, "Waiting for data...", "blue")
+                elif not self.representation:
+                    self.force_stop_representation()
+                    smart_update_label(label_status_acquisition, "Analysis in progress...", "purple")
+                    func2(*args2)
+                    smart_update_label(label_status_acquisition, "Acquisition stopped", "black")
+            except:
+                self.analysis_error()
 
-                self.fs_representation=True
-                self.data_processing()
-                self.show_data_processed()
-                self.save_data()
-                self.show_data_device()
-
-        if error:
-            label_acquisition_status.config(text="Error in analysis!", font=("Arial", 15), fg="red")
-            root.update_idletasks()
-            if not check_device_connection():
-                self.force_stop_representation()
-                disconnect_device()
-                func_Focus_combobox_menu_device(None)
-
-        self.after_id = root.after(self.time_sleep, self.run)
+        func = partial(self.run, func1, args1, func2, args2)
+        self.after_id = root.after(self.time_sleep, func)
 
 
-    def value_initialization_data_device(self):
-        data_device={
-            "time":[],
-            "lc":{k: [] for k in lc_info}
+    def analysis_error(self):
+        smart_update_label(label_status_acquisition, "Error in analysis!", "red")
+        if not check_device_connection():
+            self.force_stop_representation()
+            close_device_connection()
+            func_Focus_combobox_menu_device(None)
+
+
+    def initialization_raw_data(self):
+        self.raw_data={
+            "initial_time":0.0,
+            "time":np.zeros(self.max_number_of_samples),
+            "lc":{k: np.zeros(self.max_number_of_samples) for k in info_load_cells},
+            "size": 0
         }
+        
+    
 
-        return data_device
+    def test_normal_jump(self):
+        if not (self.jump_data and isinstance(self.jump_data["mass"], int) and self.jump_data["mass"]>0): return
 
-    def set_data_device(self, data_device):
-        for k in lc_info:
-            lines_jp[k].set_data(data_device["time"], data_device["lc"][k])
-            axes_jp[k].relim()
-            axes_jp[k].autoscale_view()
-            canvas_jp.draw()
+        # --------------------------------------------
+        clear_frame(frame_chart)
 
-    def show_default_data_device(self):
-        data_device = self.value_initialization_data_device()
-        self.set_data_device(data_device)
+        fig, axes = plt.subplots(len(info_load_cells), 1, figsize=(5, 2 * len(info_load_cells)))
+        fig.tight_layout()  # Improve the layout
+        fig.subplots_adjust(hspace=0.50)  # Increase vertical space between charts
 
-    def show_data_device(self):
-        self.set_data_device(self.data_device)
+        if len(info_load_cells) == 1:
+            axes = [axes]  # If there is only one graph, convert it to a list for consistency
 
-    def value_initialization_data_processed(self):
-        data = {
-            "mass": 0.0,
-            "jump_height": 0.0,
-            "jump_time_value": {k: 0.0 for k in lc_info},
-            "jump_time_AVG_value": 0.0,
-            "first_touch_value": {k: 0.0 for k in lc_info},
-            "jump_power_value": {k: 0.0 for k in lc_info},
-            "jump_power_AVG_value": 0.0
-        }
+        axes = {k: ax for ax, k in zip(axes, info_load_cells)}
 
-        return {"data":data, "state":{"value":False, "color":"black"}, "date":datetime.now()}
+        # Creating empty lines
+        lines = {k: axes[k].plot([], [])[0] for k in info_load_cells}
 
-    def set_processed_data(self, data_processed):
-        label_indicator_mass.config(text=f"Mass: {round(data_processed["data"]["mass"],2)} Kg", fg=data_processed["state"]["color"])
-        label_indicator_jump_height.config(text=f"Jump height: {round(data_processed["data"]["jump_height"]*100,2)} cm", fg=data_processed["state"]["color"])
+        # Axis configuration
+        for k in info_load_cells:
+            axes[k].set_title(f"Load Cell {k}")
+            axes[k].set_xlabel("Time (s)")
+            axes[k].set_ylabel("Newton (N)")
 
-        for k in lc_info:
-            label_indicator_jump_time[k].config(text=f"Jump time {k}: {round(data_processed["data"]["jump_time_value"][k], 5)} s", fg=data_processed["state"]["color"])
-        label_indicator_jump_time_AVG.config(text=f"Jump time AVG: {round(data_processed["data"]["jump_time_AVG_value"], 5)} s", fg=data_processed["state"]["color"])
+        # Tkinter Integration
+        canvas = FigureCanvasTkAgg(fig, master=frame_chart)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas.draw()
 
-        for k in lc_info:
-            label_indicator_first_touch[k].config(text=f"First touch {k}: {round(data_processed["data"]["first_touch_value"][k], 5)} s", fg=data_processed["state"]["color"])
+        # Adding the toolbar above the chart
+        toolbar = NavigationToolbar2Tk(canvas, frame_chart)
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        for k in lc_info:
-            label_indicator_jump_power[k].config(text=f"Jump power {k}: {round(data_processed["data"]["jump_power_value"][k], 3)} N", fg=data_processed["state"]["color"])
+        automatic_scaling()
+        # --------------------------------------------
+        clear_frame(frame_indicator)
 
-        label_indicator_jump_power_AVG.config(text=f"Jump power AVG: {round(data_processed["data"]["jump_power_AVG_value"], 3)} N", fg=data_processed["state"]["color"])
-        root.update_idletasks()
+        label_frame_indicator_general_data = tk.LabelFrame(frame_indicator, text=f"General data", padx=10, pady=10)
+        label_frame_indicator_general_data.pack(fill="both")
 
-    def data_processing(self):
-        data_processed = self.value_initialization_data_processed()
-        acceleration_of_gravity = 9.81
-        theshold_jump = 60
+        label_frame_indicator_jump_time = tk.LabelFrame(frame_indicator, text=f"Jump time", padx=10, pady=10)
+        label_frame_indicator_jump_time.pack(fill="both")
 
-        if self.data_device["time"] and self.data_device["lc"] and len(lc_info)>0:
-            if len(self.data_device["time"])<self.number_of_samples_for_mass_calculation:
-                data_processed["state"]["color"]="red"
-                data_processed["data"]["mass"]=-1
-            else:
-                
-                mass = {k: 0.0 for k in lc_info}
-                for k in lc_info:
-                    mass[k] = (sum(self.data_device["lc"][k][0:self.number_of_samples_for_mass_calculation])/self.number_of_samples_for_mass_calculation)/acceleration_of_gravity
-                data_processed["data"]["mass"] = sum(mass.values())
+        label_frame_indicator_first_touch = tk.LabelFrame(frame_indicator, text=f"First touch", padx=10, pady=10)
+        label_frame_indicator_first_touch.pack(fill="both")
 
-                index_first_moment_jump = {k: 0.0 for k in lc_info}
-                index_last_moment_jump = {k: 0.0 for k in lc_info}
+        label_frame_indicator_jump_power = tk.LabelFrame(frame_indicator, text=f"Jump power", padx=10, pady=10)
+        label_frame_indicator_jump_power.pack(fill="both")
+
+        label_indicator_mass = tk.Label(label_frame_indicator_general_data, text=f"Mass: {self.jump_data['mass']} Kg", font=("Arial", 12))
+        label_indicator_mass.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jump_height = tk.Label(label_frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
+        label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jump_time_AVG = tk.Label(label_frame_indicator_jump_time, text=f"Jump time AVG: {0.0} s", font=("Arial", 12))
+        label_indicator_jump_time_AVG.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jump_time = {k: tk.Label(label_frame_indicator_jump_time, text=f"Jump time {k}: {0.0} s", font=("Arial", 12)) for k in info_load_cells}
+        for k in info_load_cells:
+            label_indicator_jump_time[k].pack(side=tk.LEFT, padx=20)
+
+        label_indicator_first_touch = {k: tk.Label(label_frame_indicator_first_touch, text=f"First touch {k}: {0.0} s", font=("Arial", 12)) for k in info_load_cells}
+        for k in info_load_cells:
+            label_indicator_first_touch[k].pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jump_power_AVG = tk.Label(label_frame_indicator_jump_power, text=f"Jump power AVG: {0.0} N", font=("Arial", 12))
+        label_indicator_jump_power_AVG.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jump_power = {k: tk.Label(label_frame_indicator_jump_power, text=f"Jump power {k}: {0.0} N", font=("Arial", 12)) for k in info_load_cells}
+        for k in info_load_cells:
+            label_indicator_jump_power[k].pack(side=tk.LEFT, padx=20)
+    
+
+        automatic_scaling()
+        # --------------------------------------------
 
 
-                error=False
-                for k in lc_info:
+        def func1():
+            for k in info_load_cells:
+                lines[k].set_data(self.raw_data["time"], self.raw_data["lc"][k])
+                axes[k].relim()
+                axes[k].autoscale_view()
+                canvas.draw()
 
-                    #print(self.data_device["lc"][k])
 
-                    mask = np.array([(val >= -theshold_jump and val <= theshold_jump) for val in self.data_device["lc"][k]])
+        def func2():
+            if not (self.raw_data): return 
+
+            theshold_jump = 60 # Newton
+
+            if self.raw_data["time"] and self.raw_data["lc"]:
+    
+                index_first_moment_jump = {k: 0.0 for k in info_load_cells}
+                index_last_moment_jump = {k: 0.0 for k in info_load_cells}
+
+
+                for k in info_load_cells:
+                    mask = np.array([(val <= theshold_jump) for val in self.raw_data["lc"][k]])
                     indices = np.where(mask)[0]
                     intervals = []
                     if len(indices) > 0:
@@ -525,193 +465,168 @@ class DataRepresenter():
                                 intervals.append((start, indices[i - 1]))
                                 start = indices[i]
                         intervals.append((start, indices[-1]))
-                    
-                    #print(intervals)
 
                     if len(intervals)>0:
                         index_first_moment_jump[k] = intervals[0][0]
                         index_last_moment_jump[k] = intervals[0][1]
-                    else:
-                        error=True
-                        break
+                    else: return
 
 
-                if not error:
-                    if -1 not in index_first_moment_jump.values() and -1 not in index_last_moment_jump.values():
-                        for k in lc_info: 
-                            data_processed["data"]["first_touch_value"][k]=self.data_device["time"][index_last_moment_jump[k]]
+                if -1 not in index_first_moment_jump.values() and -1 not in index_last_moment_jump.values():
+                    data = {}
+                    for k in info_load_cells: 
+                        data["first_touch"][k]=self.raw_data["time"][index_last_moment_jump[k]]
 
-                        for k in lc_info: 
-                            data_processed["data"]["jump_time_value"][k]=data_processed["data"]["first_touch_value"][k]-self.data_device["time"][index_first_moment_jump[k]]
+                    for k in info_load_cells: 
+                        data["jump_time"][k]=data["first_touch"][k]-self.raw_data["time"][index_first_moment_jump[k]]
 
-                        data_processed["data"]["jump_time_AVG_value"]=sum(data_processed["data"]["jump_time_value"].values())/len(data_processed["data"]["jump_time_value"])
+                    data["jump_time_AVG"]=sum(data["jump_time"].values())/len(data["jump_time"])
 
-                        data_processed["data"]["jump_height"]=(1/2)*acceleration_of_gravity*((data_processed["data"]["jump_time_AVG_value"]/2)**2)
+                    data["jump_height"]=(1/2)*self.jump_data["acceleration_of_gravity"]*((data["jump_time_AVG"]/2)**2)
 
-                        for k in lc_info: 
-                            data_processed["data"]["jump_power_value"][k] = (data_processed["data"]["mass"]*acceleration_of_gravity*data_processed["data"]["jump_height"])/(data_processed["data"]["jump_time_value"][k]/2)
-                        
-                        data_processed["data"]["jump_power_AVG_value"]=sum(data_processed["data"]["jump_power_value"].values())/len(data_processed["data"]["jump_power_value"])
+                    for k in info_load_cells: 
+                        data["jump_power"][k] = (self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]*data["jump_height"])/(data["jump_time"][k]/2)
                     
-                    data_processed["state"]["value"]=True
-                
-                else:
-                    data_processed["state"]["color"]="red"
+                    data["jump_power_AVG"]=sum(data["jump_power"].values())/len(data["jump_power"])
 
 
-        else:
-            data_processed["state"]["color"]="red"
+                    smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
+                    smart_update_label(label_indicator_jump_height, f"Jump height: {round(data["jump_height"]*100,2)} cm", "black")
 
-        self.data_processed=data_processed
-   
+                    for k in info_load_cells: smart_update_label(label_indicator_jump_time[k], f"Jump time {k}: {round(data["jump_time"][k], 5)} s", "black")
+                    smart_update_label(label_indicator_jump_time_AVG, f"Jump time AVG: {round(data["jump_time_AVG"], 5)} s", "black")
 
-    def show_default_data_processed(self):
-        data_processed = self.value_initialization_data_processed()
-        self.set_processed_data(data_processed)
+                    for k in info_load_cells: smart_update_label(label_indicator_first_touch[k], f"First touch {k}: {round(data["first_touch"][k], 5)} s", "black")
 
-    def show_data_processed(self):
-        self.set_processed_data(self.data_processed)
+                    for k in info_load_cells: smart_update_label(label_indicator_jump_power[k], f"Jump power {k}: {round(data["jump_power"][k], 3)} N", "black")
 
-    def initialization_data(self):
-        self.data_device = self.value_initialization_data_device()
-        self.data_processed = self.value_initialization_data_processed()
+                    smart_update_label(label_indicator_jump_power_AVG, f"Jump power AVG: {round(data["jump_power_AVG"], 3)} N", "black")
+     
 
-    def data_is_saved(self):
-        if self.data_processed["state"]["value"]:
-            if data_saving_file_path:    
-                try:
-                    if os.path.exists(data_saving_file_path):
-                        df_old = pd.read_csv(data_saving_file_path)
-                        if (not df_old.empty) and ("date" in df_old.columns) and (self.data_processed["date"].strftime('%Y-%m-%d %H:%M:%S') in df_old["date"].values): return True
-                except: pass
-        else: return True # it means that the data does not need to be saved, so I consider it as if it were already saved
-        
-        return False
 
+        self.start_representation(func1, (), func2, ())
     
-    def save_data(self):
-        if self.data_processed["state"]["value"]:
-            if data_saving_file_path:    
-                try:
-                    df_to_save = pd.DataFrame([{"date":self.data_processed["date"].strftime('%Y-%m-%d %H:%M:%S'), **self.data_processed["data"]}])
 
-                    if os.path.exists(data_saving_file_path):
-                        try: df_old = pd.read_csv(data_saving_file_path)
-                        except pd.errors.EmptyDataError: df_old = pd.DataFrame()
 
-                        if (df_old.empty) or ("date" not in df_old.columns):
-                            df_to_save.to_csv(data_saving_file_path, index=False, header=True)
-                        
-                        elif df_to_save["date"].iloc[0] not in df_old["date"].values:
-                            df = pd.concat([df_old, df_to_save], ignore_index=True)
-                            df.to_csv(data_saving_file_path, index=False, header=True)
-                        else:
-                            #print("Data already present, not added.")
-                            pass
-                    else:
-                        df_to_save.to_csv(data_saving_file_path, index=False, header=True)
-                    
-                    return True
-                except: show_warning("Warning", "Problems saving data!")
-            else: show_warning("Warning", "File not selected for saving! Please choose a file.")
-        else: return True # it means that the data does not need to be saved, so I consider it as if it were already saved
-        
-        return False
+    def test_calculate_mass(self):
+        self.jump_data["mass"] = 0.0
 
-                
+        # --------------------------------------------
+        clear_frame(frame_chart)
+
+        fig, axis = plt.subplots(1, 1, figsize=(5, 2))
+        fig.tight_layout()  # Improve the layout
+        fig.subplots_adjust(hspace=0.50)  # Increase vertical space between charts
+
+        # Creating empty lines
+        line = axis.plot([], [])[0]
+
+        # Axis configuration
+        axis.set_title(f"Load Cell {k}")
+        axis.set_xlabel("Time (s)")
+        axis.set_ylabel("Newton (N)")
+
+        # Tkinter Integration
+        canvas = FigureCanvasTkAgg(fig, master=frame_chart)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas.draw()
+
+        # Adding the toolbar above the chart
+        toolbar = NavigationToolbar2Tk(canvas, frame_chart)
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+
+        scrollbar = ttk.Scale(root, from_=0, to=0, orient="horizontal", command=lambda val: update_view(int(float(val))))
+        scrollbar.pack(fill="x")
+
+        automatic_scaling()
+        # --------------------------------------------
+        clear_frame(frame_indicator)
+
+        label_indicator_number_samples = tk.Label(frame_indicator, text=f"Number of samples collected: {0}", font=("Arial", 12))
+        label_indicator_number_samples.grid(row=0, column=0)
+        label_indicator_mass = tk.Label(frame_indicator, text=f"Mass: {self.jump_data['mass']} Kg", font=("Arial", 12))
+        label_indicator_mass.grid(row=1, column=0, pady=10)
     
-    def _start_representation(self):
+
+        automatic_scaling()
+        # --------------------------------------------
+
+
+        def func1():
+            smart_update_label(label_indicator_number_samples, f"Number of samples collected: {self.raw_data["time"].shape[0]}", "black")
+            line.set_data(self.raw_data["time"], np.sum(self.raw_data["lc"].values(), axis=0))
+            axis.relim()
+            axis.autoscale_view()
+            canvas.draw()
+
+
+
+        def func2():
+            if not (self.raw_data): return 
+
+            if self.raw_data["time"] and self.raw_data["lc"]:
+                self.jump_data["mass"] = np.mean(np.sum(self.raw_data["lc"].values(), axis=0))/self.jump_data["acceleration_of_gravity"]
+                smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
+
+
+        self.start_representation(func1, (), func2, ())
+    
+
+    def start_representation(self, func1, args1, func2, args2):
+        smart_update_label(label_status_acquisition, "Initialization...", "black")
         self.force_stop_representation()
-        # The acquisition is at a standstill:
-
-        # flag management
+        data_acquirer.stop_acquisition()
+        data_dq.clear()
+        self.initialization_raw_data()
+        data_acquirer.start_acquisition()
         self.fs_representation=False
         self.representation=True
-        
-        
-        # empty the queue
-        data_acquirer.stop_acquisition()
-        while not self.get_data()[1]: pass
-        data_acquirer.start_acquisition()
-        
-        self.after_id = root.after(self.time_sleep, self.run)
 
-    def start_representation(self):
-        start=False
-        if not self.data_is_saved():
-            confirm = confirm_unsaved_data()
-            if (confirm is not None) and confirm:
-                start=True
-            else:
-                start=False
-        else:
-            start=True
+        func = partial(self.run, func1, args1, func2, args2)
+        self.after_id = root.after(self.time_sleep, func)
 
-        if start:
-            label_acquisition_status.config(text="Initialization...", font=("Arial", 15), fg="black")
-            root.update_idletasks()
-            self.initialization_data()
-            self.show_default_data_processed()
-            self.show_default_data_device()
-            self._start_representation()
-
-    def _stop_representation(self):
+    def stop_representation(self):
         data_acquirer.stop_acquisition()
         self.representation=False
 
-    def stop_representation(self):
-        self._stop_representation()
-
     def force_stop_representation(self):
         self.fs_representation=True
-        self._stop_representation()
+        self.stop_representation()
 
     def stop_representation_activity(self):
         try: root.after_cancel(self.after_id)
         except: pass
         self.force_stop_representation()
-
-    def get_data(self):
-        try: return (data_queue.get(timeout=self.timeout_empty_queue), False)
-        except: return (None, True)
-
-    def data_is_valid(self, data):
-        if (data is not None
-            and data[0] is not None 
-            and "lc" in data[0] 
-            and len(data[0]["lc"])==len(lc_info)): 
-            return True
-        else: return False
     
     def add_data(self, data):
-        data_lc = data[0]["lc"]
-        if data_lc and (None not in data_lc):
-            self.data_device["time"].append(data[1])
-            for k in lc_info:
-                self.data_device["lc"][k].append(data_lc[k])
-            return True
-        return False
-            
-    
+        if self.raw_data and data:
+            data_lc = data["lc"]
+            if None not in data_lc["values"].values():
+                if self.raw_data["size"]<self.max_number_of_samples:
+                    if len(self.raw_data["time"])==0:  self.raw_data["initial_time"] = data_lc["time"]
+                    self.raw_data["time"][self.raw_data["size"]] = data_lc["time"]-self.raw_data["initial_time"]
+                    for k in info_load_cells: self.raw_data["lc"][k][self.raw_data["size"]] = data_lc["values"][k]
+                    self.raw_data["size"] += 1
+                else:
+                    show_warning("Attention!", "You have reached the maximum number of saveable champions.")
+                    self.force_stop_representation()
+
 
 
 
 
 
 class DataAcquirer(threading.Thread):
-    def __init__(self, device, data_queue):
+    def __init__(self):
         super().__init__()
-
-        self.device=device
-        self.data_queue=data_queue
 
         self.acquisition_activity=True
         self.acquisition=False
         self.acquiring=threading.Lock()
 
-        self.acquisition_start_time=time.time()
-
-        self.time_sleep_acquiring=0.0001
+        self.time_sleep_acquiring=0.0
         self.time_sleep_not_acquiring=0.3
 
         self._stop_acquisition()
@@ -719,28 +634,21 @@ class DataAcquirer(threading.Thread):
     def run(self):
         while self.acquisition_activity:
             with self.acquiring:
-                error=False
                 if self.acquisition:
-                    data = self.get_data()
+                    try: data_dq.append(arduino.write_and_read({"command":"get_data"}))
+                    except: 
+                        data_dq.append(None)
+                        self._stop_acquisition()
 
-                    if data is None: error=True
-
-                    self.data_queue.put((data, time.time()-self.acquisition_start_time))
-
-                if error: self._stop_acquisition()
-
-            if self.acquisition:
-                time.sleep(self.time_sleep_acquiring)
-            else:
-                time.sleep(self.time_sleep_not_acquiring)
+            if self.acquisition: time.sleep(self.time_sleep_acquiring)
+            else: time.sleep(self.time_sleep_not_acquiring)
 
 
     def _start_acquisition(self):
         self.acquisition=True
 
     def start_acquisition(self):
-        with self.acquiring: 
-            self.acquisition_start_time = time.time()
+        with self.acquiring:
             self._start_acquisition()
 
     def _stop_acquisition(self):
@@ -754,284 +662,170 @@ class DataAcquirer(threading.Thread):
         self.acquisition_activity=False
         self._stop_acquisition()
     
-    def get_data(self):
-        message_to_send_to_device = {"command":"get_data"}
-        message_device = self.device.write_and_read(message_to_send_to_device)
-        code = message_device.get_code()
-        response = message_device.get_response()
-        if code==Code('OK'):
-            if response["code"]=="OK": return response["response"]
-            else: return []
-        else: return None
 
 
 
 
 
 
+def automatic_scaling():
+    # Calculate and set the minimum size automatically
+    root.update_idletasks()
+    root.minsize(root.winfo_width(), root.winfo_height())
+    
 
+def get_connected_USB_devices():
+    global list_info_device
 
+    list_device = []
+    list_valid_device = []
+    for device in list_ports.comports(): 
+        if device.vid is not None and device.pid is not None and device.device: list_valid_device.append(device)
 
-
-
-
-def get_usb_devices():
-    device_list = []
-    valid_devices = []
-    devices_found = list_ports.comports()
-    for device in devices_found: 
-        if device.vid is not None and device.pid is not None and device.device: valid_devices.append(device)
-
-    if valid_devices:
-        for i, device in enumerate(valid_devices):
+    if list_valid_device:
+        for i, device in enumerate(list_valid_device):
             info_device = {"port": device.device}
-            device_list.append(info_device)
+            list_device.append(info_device)
     else:
         #print("No valid USB device found.")
         pass
 
-    return device_list
+    list_info_device = list_device
 
-def connect_device(info_device):
-    disconnect_device()
-    label_status_connection.config(text="Connecting...", fg="orange")
-    root.update_idletasks() 
-    arduino.info_device=info_device
-    arduino.open_connection()
-    if check_device_connection():
-        label_acquisition_status.config(text="Acquisition status: Stop", font=("Arial", 15), fg="black")
-        root.update_idletasks()
-        set_number_load_cells()
-
-        command_button_scale_tare()
-        create_indicator()
-        create_chart()
-    else:
-        disconnect_device()
+def open_device_connection(info_device, timeout):
+    global arduino, data_jump
+    close_device_connection()
+    smart_update_label(label_status_connection, "Connecting...", "orange")
+    try: 
+        arduino = Arduino(info_device, timeout) 
+        arduino.open_connection()
+        if check_device_connection():
+            get_info_load_cells()
+            command_button_scale_tare()
+        else:
+            close_device_connection()
+            func_Focus_combobox_menu_device(None)
+    except:
+        close_device_connection()
         func_Focus_combobox_menu_device(None)
 
-def disconnect_device():
-    label_status_connection.config(text="Disconnecting...", fg="orange")
-    label_scale_tare.config(text="Not calibrated!", fg="red")
-    root.update_idletasks() 
-    data_representer.force_stop_representation()
-    data_representer.show_default_data_processed()
-    data_representer.show_default_data_device()
-    arduino.close_connection()
+def clear_frame(frame):
+    for widget in frame.winfo_children(): widget.destroy()
+    automatic_scaling()
+    
+
+def close_device_connection():
+    smart_update_label(label_status_acquisition, "Acquisition stopped", "black")
+    smart_update_label(label_status_connection, "Disconnecting...", "black")
+    smart_update_label(label_scale_tare, "Not calibrated!", "red")
+    data_processor.force_stop_representation()
+    if arduino is not None: arduino.close_connection()
     check_device_connection()
 
 def func_Focus_combobox_menu_device(event):
-    data_device = get_usb_devices()
-    if data_device: combobox_menu_device['values'] = [device["port"] for device in data_device]
+    get_connected_USB_devices()
+    if list_info_device: combobox_menu_device['values'] = [info_device["port"] for info_device in list_info_device]
     else:
         combobox_menu_device['values'] = []
         combobox_menu_device.set('')  # Removes selected text
-    root.update_idletasks() 
-    return len(data_device)
+    combobox_menu_device.update_idletasks() 
     
 def func_ComboboxSelected_combobox_menu_device(event):
     selected = stringvar_menu_device.get()
-    info_device = {"port":selected}
-    connect_device(info_device)
+    for info_device in list_info_device:
+        if info_device["port"]==selected:
+            #info_device["baudrate"] = baudrate
+            #open_device_connection(info_device, timeout)
+            break
         
 def check_device_connection():
-    status_connection=True
-    if arduino.check_connection(): 
-        label_status_connection.config(text="Connected", fg="green")
-        status_connection=True
-    else: 
-        label_status_connection.config(text="Not Connected", fg="red")
-        status_connection=False
-    root.update_idletasks() 
-    return status_connection
+    if arduino is not None and arduino.check_connection(): 
+        smart_update_label(label_status_connection, "Connected", "green")
+        return True
 
-def command_button_start():
-    if check_device_connection(): data_representer.start_representation()
+    smart_update_label(label_status_connection, "Not Connected", "red")
+    return False
+
+def command_button_test(test, args):
+    if check_device_connection() and info_load_cells: test(*args)
     else: 
-        disconnect_device()
+        close_device_connection()
         func_Focus_combobox_menu_device(None)
 
-def command_button_stop():
-    data_representer.stop_representation()
+def command_button_stop_test():
+    data_processor.stop_representation()
 
 def func_WM_DELETE_WINDOW():
-    data_representer.force_stop_representation()
-
-    finish=False
-    if not data_representer.data_is_saved():
-        confirm = confirm_unsaved_data()
-        if (confirm is not None) and confirm:
-            finish=True
-        else:
-            finish=False
-    else:
-        finish=True
-    
-    if finish:
-        data_representer.stop_representation_activity()
-        data_acquirer.stop_acquisition_activity()
-        data_acquirer.join()
-        disconnect_device()
-        root.quit()
-        root.destroy()
+    data_processor.force_stop_representation()
+    data_processor.stop_representation_activity()
+    data_acquirer.stop_acquisition_activity()
+    data_acquirer.join()
+    close_device_connection()
+    root.quit()
+    root.destroy()
 
 def command_button_scale_tare():
-    label_scale_tare.config(text="Calibration...", fg="black")
-    root.update_idletasks() 
+    smart_update_label(label_scale_tare, "Calibration...", "black")
+
     if check_device_connection():
-        message_to_send_to_device = {"command":"scale_tare"}
-        message_device = arduino.write_and_read(message_to_send_to_device)
-        if message_device.get_code()==Code('OK') and message_device.get_response() is not None: 
-            result = message_device.get_response()["response"]["lc"]
+        try:
+            result = arduino.write_and_read({"command":"scale_tare"})["lc"]
             result_string = ""
-            for k in lc_info:
-                result_string += f"{k}: {result[k]} | "
-            label_scale_tare.config(text=result_string[:-3], fg="black")
-        else: 
-            label_scale_tare.config(text="Not calibrated!", fg="red")
-        root.update_idletasks() 
+            for i, k in enumerate(info_load_cells.keys()):
+                result_string += f"{k}: {result[k]}"
+                if i < len(info_load_cells)-1: result_string += " | "
+            smart_update_label(label_scale_tare, result_string, "black")
+        except:
+            smart_update_label(label_scale_tare, "Not calibrated!", "red")
     else: 
-        disconnect_device()
+        close_device_connection()
         func_Focus_combobox_menu_device(None)
 
-def update_label_open_file():
-    label_open_file.config(text=f"Open file: {data_saving_file_path}", fg="black")
-    root.update_idletasks() 
-
-def open_file():
-    """Allows the user to select an existing file."""
-    global data_saving_file_path
-    file_path = filedialog.askopenfilename(title="Select a CSV file", filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
-    if file_path: data_saving_file_path=file_path
-    update_label_open_file()
-
-
-def new_file():
-    """Allows the user to choose a name and folder for a new file."""
-    global data_saving_file_path
-    file_path = filedialog.asksaveasfilename(title="Create a new CSV file",
-                                             defaultextension=".csv",
-                                             filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
-    
-    if file_path: data_saving_file_path=file_path
-    update_label_open_file()
-
-
-def command_button_save():
-    data_representer.save_data()
-
-def confirm_unsaved_data():
-    """Opens a dialog asking the user whether to save before proceeding.
-    
-    Returns:
-        True if "Save" is selected,
-        False if "Don't Save" is selected,
-        None if "Cancel" is selected.
-    """
-    root = tk.Tk()
-    root.withdraw()  # Hide the main window
-    response = messagebox.askyesnocancel("Unsaved Changes", "Are you sure you want to proceed without saving?")
-    return response 
                 
+def smart_update_label(label, text=None, fg=None):
+    current_text = label.cget("text")
+    current_fg = label.cget("fg")
 
-    
+    if (text is not None and text != current_text) or (fg is not None and fg != current_fg):
+        label.config(text=text if text is not None else current_text, fg=fg if fg is not None else current_fg)
+        label.update_idletasks()
+
+
 def show_warning(title, message):
     root = tk.Tk()
     root.withdraw()
     messagebox.showwarning(title, message)
 
 
-def create_chart():
-    for widget in frame_chart.winfo_children(): widget.destroy()
+def get_info_load_cells():
+    global info_load_cells
+    info_load_cells=[]
 
-    if len(lc_info)>0:
-        global axes_jp, lines_jp, canvas_jp
-        fig, axes_jp = plt.subplots(len(lc_info), 1, figsize=(5, 2 * len(lc_info)))
-        fig.tight_layout()  # Improve the layout
-        fig.subplots_adjust(hspace=0.50)  # Increase vertical space between charts
-
-        if len(lc_info) == 1:
-            axes_jp = [axes_jp]  # If there is only one graph, convert it to a list for consistency
-
-        axes_jp = {k: ax for ax, k in zip(axes_jp, lc_info)}
-
-        # Creating empty lines
-        lines_jp = {k: axes_jp[k].plot([], [])[0] for k in lc_info}
-
-        # Axis configuration
-        for k in lc_info:
-            axes_jp[k].set_title(f"Load Cell {k}")
-            axes_jp[k].set_xlabel("Time (s)")
-            axes_jp[k].set_ylabel("Newton (N)")
+    if check_device_connection():
+        try:
+            result = arduino.write_and_read({"command":"get_info"})
+            info_load_cells = result["lc"]
+        except:
+            close_device_connection()
+            func_Focus_combobox_menu_device(None)
+    else:
+        close_device_connection()
+        func_Focus_combobox_menu_device(None)
 
 
-        # Tkinter Integration
-        canvas_jp = FigureCanvasTkAgg(fig, master=frame_chart)
-        canvas_jp.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        canvas_jp.draw()
-
-        # Adding the toolbar above the chart
-        toolbar = NavigationToolbar2Tk(canvas_jp, frame_chart)
-        toolbar.pack(side=tk.TOP, fill=tk.X)
-        canvas_jp.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-    root.update_idletasks()
-    root.minsize(root.winfo_width(), root.winfo_height())
 
 
-def create_indicator():
-    for widget in frame_indicator_jump_time.winfo_children(): widget.destroy()
-    for widget in frame_indicator_first_touch.winfo_children(): widget.destroy()
-    for widget in frame_indicator_jump_power.winfo_children(): widget.destroy()
-
-    global label_indicator_first_touch, label_indicator_jump_power, label_indicator_jump_time
-    global label_indicator_jump_time_AVG, label_indicator_jump_power_AVG
-
-    label_indicator_jump_time_AVG = tk.Label(frame_indicator_jump_time, text=f"Jump time AVG: {0.0} s", font=("Arial", 12))
-    label_indicator_jump_time_AVG.pack(side=tk.LEFT, padx=20)
-
-    label_indicator_jump_time = {k: tk.Label(frame_indicator_jump_time, text=f"Jump time {k}: {0.0} s", font=("Arial", 12)) for k in lc_info}
-    for k in lc_info:
-        label_indicator_jump_time[k].pack(side=tk.LEFT, padx=20)
-
-    label_indicator_first_touch = {k: tk.Label(frame_indicator_first_touch, text=f"First touch {k}: {0.0} s", font=("Arial", 12)) for k in lc_info}
-    for k in lc_info:
-        label_indicator_first_touch[k].pack(side=tk.LEFT, padx=20)
-
-    label_indicator_jump_power_AVG = tk.Label(frame_indicator_jump_power, text=f"Jump power AVG: {0.0} N", font=("Arial", 12))
-    label_indicator_jump_power_AVG.pack(side=tk.LEFT, padx=20)
-
-    label_indicator_jump_power = {k: tk.Label(frame_indicator_jump_power, text=f"Jump power {k}: {0.0} N", font=("Arial", 12)) for k in lc_info}
-    for k in lc_info:
-        label_indicator_jump_power[k].pack(side=tk.LEFT, padx=20)
-    
- 
-    root.update_idletasks()
-    root.minsize(root.winfo_width(), root.winfo_height())
-
-
-def set_number_load_cells():
-    global lc_info
-    message_to_send_to_device = {"command":"get_info"}
-    message_device = arduino.write_and_read(message_to_send_to_device)
-    code = message_device.get_code()
-    response = message_device.get_response()
-    if code==Code('OK'):
-        if response["code"]=="OK": lc_info = response["response"]["lc"]
-        else: lc_info = []
-    else: lc_info=[]
-    
 
 # ----------------------
 
-data_saving_file_path = ""
-lc_info = []
+info_load_cells = []
+list_info_device = []
 
 root = tk.Tk()
-arduino = Arduino(device_timeout=2, baudrate=460800)
-data_queue=queue.Queue()
-data_acquirer = DataAcquirer(arduino, data_queue)
-data_representer = DataRepresenter()
+arduino = None
+data_dq = deque()
+data_acquirer = DataAcquirer()
+data_processor = DataProcessor()
 
 
 # Creation of main window
@@ -1039,18 +833,6 @@ root.title("Jumping platform")
 #root.geometry("1000x1000")
 
 root.protocol("WM_DELETE_WINDOW", func_WM_DELETE_WINDOW)
-
-menu_bar = tk.Menu(root)
-file_menu = tk.Menu(menu_bar, tearoff=0)
-file_menu.add_command(label="New", command=new_file)
-file_menu.add_command(label="Open", command=open_file)
-menu_bar.add_cascade(label="File", menu=file_menu)
-root.config(menu=menu_bar)
-
-frame_open_file = tk.Frame(root)
-frame_open_file.pack(fill="x")
-label_open_file = tk.Label(frame_open_file, text=f"Open file: {data_saving_file_path}")
-label_open_file.pack(side=tk.LEFT)
 
 # Device Selection and Status
 frame_menu_device = tk.Frame(root)
@@ -1061,13 +843,12 @@ stringvar_menu_device = tk.StringVar()
 combobox_menu_device = ttk.Combobox(frame_menu_device, textvariable=stringvar_menu_device, state="readonly")
 combobox_menu_device.pack(side=tk.LEFT, padx=10)
 combobox_menu_device.bind("<<ComboboxSelected>>", func_ComboboxSelected_combobox_menu_device)
-combobox_menu_device.bind("<FocusIn>", func_Focus_combobox_menu_device)
+#combobox_menu_device.bind("<FocusIn>", func_Focus_combobox_menu_device)
 combobox_menu_device.bind("<FocusOut>", func_Focus_combobox_menu_device)
+func_Focus_combobox_menu_device(None)
 
 label_status_connection = tk.Label(frame_menu_device, text="Not Connected", fg="red")
 label_status_connection.pack(side=tk.LEFT, padx=10)
-
-func_Focus_combobox_menu_device(None)
 
 # Scale tare
 frame_scale_tare = tk.Frame(root)
@@ -1077,56 +858,31 @@ button_scale_tare.pack(side=tk.LEFT, padx=10)
 label_scale_tare = tk.Label(frame_scale_tare, text=f"Not calibrated!", font=("Arial", 12), fg="red")
 label_scale_tare.pack(side=tk.LEFT, padx=20)
 
-# Button section
+# Acquisition section
 frame_acquisition = tk.Frame(root)
 frame_acquisition.pack(pady=10)
 
-button_start = tk.Button(frame_acquisition, text="Start", command=command_button_start)
-button_start.pack(side=tk.LEFT, padx=10)
-button_stop = tk.Button(frame_acquisition, text="Stop", command=command_button_stop)
-button_stop.pack(side=tk.LEFT, padx=10)
-button_save = tk.Button(frame_acquisition, text="Save", command=command_button_save)
-button_save.pack(side=tk.LEFT, padx=10)
-
+button_test_normal_jump = tk.Button(frame_acquisition, text="Normal jump", command=lambda: command_button_test(data_processor.test_normal_jump, ()))
+button_test_normal_jump.grid(row=0, column=0)
+button_test_calculate_mass = tk.Button(frame_acquisition, text="Calculate mass", command=lambda: command_button_test(data_processor.test_calculate_mass, ()))
+button_test_calculate_mass.grid(row=0, column=1)
+button_stop_test = tk.Button(frame_acquisition, text="Stop test", command=command_button_stop_test)
+button_stop_test.grid(row=0, column=2)
+label_status_acquisition = tk.Label(frame_acquisition, text=f"Acquisition status: Stop", font=("Arial", 15))
+label_status_acquisition.grid(row=1, column=1, pady=10)
 
 # Indicators section
-frame_acquisition_status = tk.LabelFrame(root)
-frame_acquisition_status.pack(pady=10)
-label_acquisition_status = tk.Label(frame_acquisition_status, text=f"Acquisition status: Stop", font=("Arial", 15))
-label_acquisition_status.pack(side=tk.LEFT)
-
-frame_indicator_general_data = tk.LabelFrame(root, text=f"General data", padx=10, pady=10)
-frame_indicator_general_data.pack(fill="both")
-label_indicator_mass = tk.Label(frame_indicator_general_data, text=f"Mass: {0.0} Kg", font=("Arial", 12))
-label_indicator_mass.pack(side=tk.LEFT, padx=20)
-label_indicator_jump_height = tk.Label(frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
-label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
-
-frame_indicator_jump_time = tk.LabelFrame(root, text=f"Jump time", padx=10, pady=10)
-frame_indicator_jump_time.pack(fill="both")
-
-frame_indicator_first_touch = tk.LabelFrame(root, text=f"First touch", padx=10, pady=10)
-frame_indicator_first_touch.pack(fill="both")
-
-frame_indicator_jump_power = tk.LabelFrame(root, text=f"Jump power", padx=10, pady=10)
-frame_indicator_jump_power.pack(fill="both")
-
-create_indicator()
+frame_indicator = tk.Frame(root)
+frame_indicator.pack(pady=10)
 
 # Chart section
-
 frame_chart = tk.Frame(root)
 frame_chart.pack(fill=tk.BOTH, expand=True)
-
-create_chart()
 
 # Starting data acquirer
 data_acquirer.start()
 
-# Calculate and set the minimum size automatically
-root.update_idletasks()  # Force Tkinter to calculate minimum size
-root.minsize(root.winfo_width(), root.winfo_height())
 
+automatic_scaling()
 # Starting root mainloop
 root.mainloop()
-
