@@ -288,7 +288,18 @@ class Arduino(USBIODevice):
         self.device_connection.write(f"?{json.dumps(data)}!".encode())
 
 
+class RawData(dict):
+    def __getitem__(self, key):
+        if key == 'time':
+            time = self['unsliced_time']
+            size = self['size']
+            return time[:size]
+        elif key == 'lc':
+            lc = self['unsliced_lc']
+            size = self['size']
+            return lc[:, :size]
 
+        return super().__getitem__(key)
 
 
 
@@ -305,8 +316,7 @@ class DataProcessor():
         self.representation=False 
     
         self.time_sleep=10 # ms (milliseconds)
-        self.max_number_of_samples = 50000
-
+        
         self.initialization_raw_data()
         self.force_stop_representation()
 
@@ -346,19 +356,54 @@ class DataProcessor():
             func_Focus_combobox_menu_device(None)
 
 
-    def initialization_raw_data(self):
-        self.raw_data={
-            "initial_time":0.0,
-            "time":np.zeros(self.max_number_of_samples),
-            "lc":{k: np.zeros(self.max_number_of_samples) for k in info_load_cells},
-            "size": 0
-        }
+    def initialization_raw_data(self, max_num_samples):
+        raw_data = RawData()
+        raw_data["initial_time"] = 0.0
+        raw_data["unsliced_time"] = np.zeros(max_num_samples)
+        raw_data["unsliced_lc"] = np.zeros((len(info_load_cells), max_num_samples)),
+        raw_data["size"] = 0
+        raw_data["max_size"] = max_num_samples
+        self.raw_data = raw_data
         
     
 
     def test_normal_jump(self):
         if not (self.jump_data and isinstance(self.jump_data["mass"], int) and self.jump_data["mass"]>0): return
 
+        max_num_samples=50000
+        # --------------------------------------------
+        clear_frame(frame_control_test)
+        automatic_scaling()
+        # --------------------------------------------
+        clear_frame(frame_indicator)
+
+        label_frame_indicator_general_data = tk.LabelFrame(frame_indicator, text=f"General data", padx=10, pady=10)
+        label_frame_indicator_general_data.pack(fill="both")
+
+        label_frame_indicator_jump_power = tk.LabelFrame(frame_indicator, text=f"Jump power", padx=10, pady=10)
+        label_frame_indicator_jump_power.pack(fill="both")
+
+        label_indicator_mass = tk.Label(label_frame_indicator_general_data, text=f"Mass: {self.jump_data['mass']} Kg", font=("Arial", 12))
+        label_indicator_mass.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jump_height = tk.Label(label_frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
+        label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jump_time_AVG = tk.Label(label_frame_indicator_general_data, text=f"Jump time: {0.0} s", font=("Arial", 12))
+        label_indicator_jump_time_AVG.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_first_touch = tk.Label(label_frame_indicator_general_data, text=f"First touch: {0.0} s", font=("Arial", 12))
+        label_indicator_first_touch.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jump_power_AVG = tk.Label(label_frame_indicator_jump_power, text=f"Jump power AVG: {0.0} N", font=("Arial", 12))
+        label_indicator_jump_power_AVG.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jump_power = {k: tk.Label(label_frame_indicator_jump_power, text=f"Jump power {k}: {0.0} N", font=("Arial", 12)) for k in info_load_cells}
+        for k in info_load_cells:
+            label_indicator_jump_power[k].pack(side=tk.LEFT, padx=20)
+    
+
+        automatic_scaling()
         # --------------------------------------------
         clear_frame(frame_chart)
 
@@ -392,125 +437,154 @@ class DataProcessor():
 
         automatic_scaling()
         # --------------------------------------------
-        clear_frame(frame_indicator)
+        def launch_analysis():
+            range_min, range_max = np.iinfo(np.int32).min, 60 # Newton
+            visible_window = 5000 # Num visible samples
 
-        label_frame_indicator_general_data = tk.LabelFrame(frame_indicator, text=f"General data", padx=10, pady=10)
-        label_frame_indicator_general_data.pack(fill="both")
+            # Trova intervalli con valori compresi nel range su **almeno una** serie
+            mask = ((y >= range_min) & (y <= range_max)).any(axis=0)
+            intervals = []
+            start = None
+            for i, val in enumerate(mask):
+                if val and start is None:
+                    start = i
+                elif not val and start is not None:
+                    if i - start > 10:
+                        intervals.append((start, i))
+                    start = None
+            if start is not None and (len(mask) - start > 10):
+                intervals.append((start, len(mask)))
 
-        label_frame_indicator_jump_time = tk.LabelFrame(frame_indicator, text=f"Jump time", padx=10, pady=10)
-        label_frame_indicator_jump_time.pack(fill="both")
 
-        label_frame_indicator_first_touch = tk.LabelFrame(frame_indicator, text=f"First touch", padx=10, pady=10)
-        label_frame_indicator_first_touch.pack(fill="both")
+            selected_interval_idx = [0]  # initialize with first range selected
 
-        label_frame_indicator_jump_power = tk.LabelFrame(frame_indicator, text=f"Jump power", padx=10, pady=10)
-        label_frame_indicator_jump_power.pack(fill="both")
+            win = tk.Toplevel(root)
+            win.title("Data Analyzed")
 
-        label_indicator_mass = tk.Label(label_frame_indicator_general_data, text=f"Mass: {self.jump_data['mass']} Kg", font=("Arial", 12))
-        label_indicator_mass.pack(side=tk.LEFT, padx=20)
+            fig, ax = plt.subplots(figsize=(10, 4))
+            lines = [ax.plot(self.raw_data["time"], y_row, label=label)[0] for y_row, label in zip(self.raw_data["lc"], info_load_cells)]
+            ax.set_xlim(0, visible_window)
+            ax.legend(loc="upper right")
 
-        label_indicator_jump_height = tk.Label(label_frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
-        label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
+            highlighted_patches = []
 
-        label_indicator_jump_time_AVG = tk.Label(label_frame_indicator_jump_time, text=f"Jump time AVG: {0.0} s", font=("Arial", 12))
-        label_indicator_jump_time_AVG.pack(side=tk.LEFT, padx=20)
+            if intervals:
+                for i, (start, end) in enumerate(intervals):
+                    color = 'lightcoral' if i == selected_interval_idx[0] else 'lightblue'
+                    patch = ax.axvspan(start, end, color=color, alpha=0.3, zorder=0)
+                    highlighted_patches.append(patch)
+            else:
+                # No interval: you could optionally show a message
+                # print("No ranges found.")
+                pass
 
-        label_indicator_jump_time = {k: tk.Label(label_frame_indicator_jump_time, text=f"Jump time {k}: {0.0} s", font=("Arial", 12)) for k in info_load_cells}
-        for k in info_load_cells:
-            label_indicator_jump_time[k].pack(side=tk.LEFT, padx=20)
+            canvas = FigureCanvasTkAgg(fig, master=win)
+            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
 
-        label_indicator_first_touch = {k: tk.Label(label_frame_indicator_first_touch, text=f"First touch {k}: {0.0} s", font=("Arial", 12)) for k in info_load_cells}
-        for k in info_load_cells:
-            label_indicator_first_touch[k].pack(side=tk.LEFT, padx=20)
+            def update_xlim(val):
+                start = int(scroll_var.get())
+                ax.set_xlim(start, start + visible_window)
+                fig.canvas.draw_idle()
 
-        label_indicator_jump_power_AVG = tk.Label(label_frame_indicator_jump_power, text=f"Jump power AVG: {0.0} N", font=("Arial", 12))
-        label_indicator_jump_power_AVG.pack(side=tk.LEFT, padx=20)
+            scroll_var = tk.DoubleVar(value=0)
+            scrollbar = ttk.Scale(win, from_=0, to=len(self.raw_data["time"]) - visible_window,
+                                variable=scroll_var, orient='horizontal', command=update_xlim)
+            scrollbar.pack(fill=tk.X)
 
-        label_indicator_jump_power = {k: tk.Label(label_frame_indicator_jump_power, text=f"Jump power {k}: {0.0} N", font=("Arial", 12)) for k in info_load_cells}
-        for k in info_load_cells:
-            label_indicator_jump_power[k].pack(side=tk.LEFT, padx=20)
-    
+            def on_click(event):
+                if not intervals or event.inaxes != ax:
+                    return
+                clicked_x = int(event.xdata)
+                for i, (start, end) in enumerate(intervals):
+                    if start <= clicked_x <= end:
+                        # update selection
+                        prev = selected_interval_idx[0]
+                        selected_interval_idx[0] = i
+                        highlighted_patches[prev].set_color('lightblue')
+                        highlighted_patches[i].set_color('lightcoral')
+                        fig.canvas.draw_idle()
+                        break
 
-        automatic_scaling()
-        # --------------------------------------------
+            fig.canvas.mpl_connect('button_press_event', on_click)
+
+            def confirm_selection():
+                if intervals:
+                    start, end = intervals[selected_interval_idx[0]]
+                else:
+                    start, end = -1, -1
+                win.destroy()
+                analyze_callback(start, end)
+
+            analyze_button = ttk.Button(win, text="Analyze", command=confirm_selection)
+            analyze_button.pack(pady=10)
+        
+        def analyze_callback(start, end):
+            if start !=-1 and end != -1:
+                data = {}
+                
+                data["first_touch"]=self.raw_data["time"][end]
+                data["jump_time"]=data["first_touch"]-self.raw_data["time"][start]
+
+                data["jump_height"]=(1/2)*self.jump_data["acceleration_of_gravity"]*((data["jump_time"]/2)**2)
+
+                for k in info_load_cells: 
+                    data["jump_power"][k] = (self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]*data["jump_height"])/(data["jump_time"][k]/2)
+                
+                data["jump_power_AVG"]=sum(data["jump_power"].values())/len(data["jump_power"])
+
+
+                smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
+                smart_update_label(label_indicator_jump_height, f"Jump height: {round(data["jump_height"]*100,2)} cm", "black")
+
+                smart_update_label(label_indicator_jump_time_AVG, f"Jump time: {round(data["jump_time"], 5)} s", "black")
+
+                smart_update_label(label_indicator_first_touch, f"First touch: {round(data["first_touch"], 5)} s", "black")
+
+                #for k in info_load_cells: smart_update_label(label_indicator_jump_power[k], f"Jump power {k}: {round(data["jump_power"][k], 3)} N", "black")
+                #smart_update_label(label_indicator_jump_power_AVG, f"Jump power AVG: {round(data["jump_power_AVG"], 3)} N", "black")
+
 
 
         def func1():
-            for k in info_load_cells:
-                lines[k].set_data(self.raw_data["time"], self.raw_data["lc"][k])
+            for i, k in enumerate(info_load_cells):
+                lines[k].set_data(self.raw_data["time"], self.raw_data["lc"][i])
                 axes[k].relim()
                 axes[k].autoscale_view()
-                canvas.draw()
+            canvas.draw()
 
 
         def func2():
-            if not (self.raw_data): return 
+            if not (self.raw_data and self.raw_data["size"]>0): return 
 
-            theshold_jump = 60 # Newton
-
-            if self.raw_data["time"] and self.raw_data["lc"]:
-    
-                index_first_moment_jump = {k: 0.0 for k in info_load_cells}
-                index_last_moment_jump = {k: 0.0 for k in info_load_cells}
-
-
-                for k in info_load_cells:
-                    mask = np.array([(val <= theshold_jump) for val in self.raw_data["lc"][k]])
-                    indices = np.where(mask)[0]
-                    intervals = []
-                    if len(indices) > 0:
-                        start = indices[0]
-                        for i in range(1, len(indices)):
-                            if indices[i] != indices[i - 1] + 1: 
-                                intervals.append((start, indices[i - 1]))
-                                start = indices[i]
-                        intervals.append((start, indices[-1]))
-
-                    if len(intervals)>0:
-                        index_first_moment_jump[k] = intervals[0][0]
-                        index_last_moment_jump[k] = intervals[0][1]
-                    else: return
-
-
-                if -1 not in index_first_moment_jump.values() and -1 not in index_last_moment_jump.values():
-                    data = {}
-                    for k in info_load_cells: 
-                        data["first_touch"][k]=self.raw_data["time"][index_last_moment_jump[k]]
-
-                    for k in info_load_cells: 
-                        data["jump_time"][k]=data["first_touch"][k]-self.raw_data["time"][index_first_moment_jump[k]]
-
-                    data["jump_time_AVG"]=sum(data["jump_time"].values())/len(data["jump_time"])
-
-                    data["jump_height"]=(1/2)*self.jump_data["acceleration_of_gravity"]*((data["jump_time_AVG"]/2)**2)
-
-                    for k in info_load_cells: 
-                        data["jump_power"][k] = (self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]*data["jump_height"])/(data["jump_time"][k]/2)
-                    
-                    data["jump_power_AVG"]=sum(data["jump_power"].values())/len(data["jump_power"])
-
-
-                    smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
-                    smart_update_label(label_indicator_jump_height, f"Jump height: {round(data["jump_height"]*100,2)} cm", "black")
-
-                    for k in info_load_cells: smart_update_label(label_indicator_jump_time[k], f"Jump time {k}: {round(data["jump_time"][k], 5)} s", "black")
-                    smart_update_label(label_indicator_jump_time_AVG, f"Jump time AVG: {round(data["jump_time_AVG"], 5)} s", "black")
-
-                    for k in info_load_cells: smart_update_label(label_indicator_first_touch[k], f"First touch {k}: {round(data["first_touch"][k], 5)} s", "black")
-
-                    for k in info_load_cells: smart_update_label(label_indicator_jump_power[k], f"Jump power {k}: {round(data["jump_power"][k], 3)} N", "black")
-
-                    smart_update_label(label_indicator_jump_power_AVG, f"Jump power AVG: {round(data["jump_power_AVG"], 3)} N", "black")
+            clear_frame(frame_control_test)
+            analyze_btn = ttk.Button(root, text="Analyze data", command=launch_analysis)
+            analyze_btn.pack(padx=20, pady=20)
+            automatic_scaling()           
      
 
 
-        self.start_representation(func1, (), func2, ())
+        self.start_representation(max_num_samples, func1, (), func2, ())
     
 
 
     def test_calculate_mass(self):
         self.jump_data["mass"] = 0.0
 
+        max_num_samples=50000
+
+        # --------------------------------------------
+        clear_frame(frame_control_test)
+        automatic_scaling()
+        # --------------------------------------------
+        clear_frame(frame_indicator)
+
+        label_indicator_number_samples = tk.Label(frame_indicator, text=f"Number of samples collected: {0}", font=("Arial", 12))
+        label_indicator_number_samples.grid(row=0, column=0)
+        label_indicator_mass = tk.Label(frame_indicator, text=f"Mass: {self.jump_data['mass']} Kg", font=("Arial", 12))
+        label_indicator_mass.grid(row=1, column=0, pady=10)
+    
+
+        automatic_scaling()
         # --------------------------------------------
         clear_frame(frame_chart)
 
@@ -522,7 +596,7 @@ class DataProcessor():
         line = axis.plot([], [])[0]
 
         # Axis configuration
-        axis.set_title(f"Load Cell {k}")
+        axis.set_title(f"Mass chart")
         axis.set_xlabel("Time (s)")
         axis.set_ylabel("Newton (N)")
 
@@ -536,50 +610,35 @@ class DataProcessor():
         toolbar.pack(side=tk.TOP, fill=tk.X)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-
-        scrollbar = ttk.Scale(root, from_=0, to=0, orient="horizontal", command=lambda val: update_view(int(float(val))))
-        scrollbar.pack(fill="x")
-
-        automatic_scaling()
-        # --------------------------------------------
-        clear_frame(frame_indicator)
-
-        label_indicator_number_samples = tk.Label(frame_indicator, text=f"Number of samples collected: {0}", font=("Arial", 12))
-        label_indicator_number_samples.grid(row=0, column=0)
-        label_indicator_mass = tk.Label(frame_indicator, text=f"Mass: {self.jump_data['mass']} Kg", font=("Arial", 12))
-        label_indicator_mass.grid(row=1, column=0, pady=10)
-    
-
         automatic_scaling()
         # --------------------------------------------
 
 
         def func1():
-            smart_update_label(label_indicator_number_samples, f"Number of samples collected: {self.raw_data["time"].shape[0]}", "black")
-            line.set_data(self.raw_data["time"], np.sum(self.raw_data["lc"].values(), axis=0))
+            smart_update_label(label_indicator_number_samples, f"Number of samples collected: {self.raw_data["size"]}", "black")
+            line.set_data(self.raw_data["time"], np.sum(self.raw_data["lc"], axis=0))
             axis.relim()
             axis.autoscale_view()
             canvas.draw()
-
 
 
         def func2():
             if not (self.raw_data): return 
 
             if self.raw_data["time"] and self.raw_data["lc"]:
-                self.jump_data["mass"] = np.mean(np.sum(self.raw_data["lc"].values(), axis=0))/self.jump_data["acceleration_of_gravity"]
+                self.jump_data["mass"] = np.mean(np.sum(self.raw_data["lc"], axis=0))/self.jump_data["acceleration_of_gravity"]
                 smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
 
 
-        self.start_representation(func1, (), func2, ())
+        self.start_representation(max_num_samples, func1, (), func2, ())
     
 
-    def start_representation(self, func1, args1, func2, args2):
+    def start_representation(self, max_num_samples, func1, args1, func2, args2):
         smart_update_label(label_status_acquisition, "Initialization...", "black")
         self.force_stop_representation()
         data_acquirer.stop_acquisition()
         data_dq.clear()
-        self.initialization_raw_data()
+        self.initialization_raw_data(max_num_samples)
         data_acquirer.start_acquisition()
         self.fs_representation=False
         self.representation=True
@@ -604,10 +663,10 @@ class DataProcessor():
         if self.raw_data and data:
             data_lc = data["lc"]
             if None not in data_lc["values"].values():
-                if self.raw_data["size"]<self.max_number_of_samples:
-                    if len(self.raw_data["time"])==0:  self.raw_data["initial_time"] = data_lc["time"]
-                    self.raw_data["time"][self.raw_data["size"]] = data_lc["time"]-self.raw_data["initial_time"]
-                    for k in info_load_cells: self.raw_data["lc"][k][self.raw_data["size"]] = data_lc["values"][k]
+                if self.raw_data["size"]<self.raw_data["max_size"]:
+                    if self.raw_data["size"]:  self.raw_data["initial_time"] = data_lc["time"]
+                    self.raw_data["unsliced_time"][self.raw_data["size"]] = data_lc["time"]-self.raw_data["initial_time"]
+                    for i, k in enumerate(info_load_cells): self.raw_data["unsliced_lc"][i][self.raw_data["size"]] = data_lc["values"][k]
                     self.raw_data["size"] += 1
                 else:
                     show_warning("Attention!", "You have reached the maximum number of saveable champions.")
@@ -734,8 +793,8 @@ def func_ComboboxSelected_combobox_menu_device(event):
     selected = stringvar_menu_device.get()
     for info_device in list_info_device:
         if info_device["port"]==selected:
-            #info_device["baudrate"] = baudrate
-            #open_device_connection(info_device, timeout)
+            info_device["baudrate"] = 460800
+            open_device_connection(info_device, 2)
             break
         
 def check_device_connection():
@@ -870,6 +929,10 @@ button_stop_test = tk.Button(frame_acquisition, text="Stop test", command=comman
 button_stop_test.grid(row=0, column=2)
 label_status_acquisition = tk.Label(frame_acquisition, text=f"Acquisition status: Stop", font=("Arial", 15))
 label_status_acquisition.grid(row=1, column=1, pady=10)
+
+# Control test section
+frame_control_test = tk.Frame(root)
+frame_control_test.pack(pady=10)
 
 # Indicators section
 frame_indicator = tk.Frame(root)
