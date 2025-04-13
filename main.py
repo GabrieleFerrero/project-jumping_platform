@@ -1,21 +1,20 @@
 import tkinter as tk
 from tkinter import ttk
-from tkinter import filedialog, messagebox
-import os
+from tkinter import messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import serial
 from serial.tools import list_ports
-from datetime import datetime
 import json
 from abc import ABC, abstractmethod
 import threading
 import time
 import queue
-import pandas as pd
 import numpy as np
 from collections import deque
 from functools import partial
+from itertools import product
+import math
 
 
 
@@ -48,50 +47,6 @@ class Code():
         return str(self.code)
 
 
-class Message():
-    def __init__(self):
-        self.messagge = {
-            'timestamp': datetime.now().strftime('%Y-%m-%d_%H:%M:%S.%f'),
-            'action': '',
-            'code': Code("NULL"),
-            'code_description': '',
-            'recalled_actions': [],
-            'response': None
-        }
-
-    def __str__(self):
-        
-        messagge_str = {
-            'timestamp': str(self.messagge['timestamp']),
-            'action': str(self.messagge['action']),
-            'code': str(self.messagge['code']),
-            'code_description': str(self.messagge['code_description']),
-            'recalled_actions': [json.loads(str(action)) for action in self.messagge['recalled_actions']],
-            'response': str(self.messagge['response'])
-        }
-        
-        return json.dumps(messagge_str, indent=4)
-    
-    def set_action(self, action):
-        self.messagge["action"]=action
-
-    def set_code(self, code):
-        self.messagge["code"]=code
-    
-    def set_code_description(self, code_description):
-        self.messagge["code_description"]=code_description
-    
-    def set_response(self, response):
-        self.messagge["response"]=response
-    
-    def add_recalled_actions(self, recalled_actions):
-        self.messagge["recalled_actions"].append(recalled_actions)
-    
-    def get_code(self):
-        return self.messagge["code"]
-
-    def get_response(self):
-        return self.messagge["response"]
     
 
 class IODevice(ABC):
@@ -303,7 +258,7 @@ class RawData(dict):
 
 
 
-class DataProcessor():
+class DataRappresentor():
     def __init__(self):
 
         self.after_id=None
@@ -312,71 +267,310 @@ class DataProcessor():
             "mass": 0.0,
             "acceleration_of_gravity": 9.81
         }
-        self.fs_representation=True # force stop representation
-        self.representation=False 
+        self.stop_representation=False # force stop representation
+        self.request_stop_representation=False 
     
-        self.time_sleep=10 # ms (milliseconds)
+        self.time_sleep=2 # ms (milliseconds)
         
-        self.initialization_raw_data()
-        self.force_stop_representation()
+        self.initializationRawData(0)
+        self.stopRepresentation()
 
 
     def run(self, func1, args1, func2, args2):
-        if not self.fs_representation:
+        if not self.stop_representation:
             try:
                 data = data_dq.popleft()
-                if data is not None: 
-                    self.add_data(data)
-                    if self.representation:
+                if data is not None:
+                    self.addData(data)
+                    if not self.request_stop_representation:
                         smart_update_label(label_status_acquisition, "Acquisition in progress...", "green")
-                    elif not self.representation:
+                        func1(*args1)
+                    elif self.request_stop_representation:
                         smart_update_label(label_status_acquisition, "Saving the last samples...", "orange")
-                    func1(*args1)
-                else: self.analysis_error()
-            except IndexError: # deque is empty
-                if self.representation:
+                        while not self.stop_representation:
+                            data = data_dq.popleft()
+                            self.addData(data)
+
+                else: self.analysisError()
+            except IndexError as e: # deque is empty
+                #print(f"IndexError: {e}")
+                if not self.request_stop_representation:
                     smart_update_label(label_status_acquisition, "Waiting for data...", "blue")
-                elif not self.representation:
-                    self.force_stop_representation()
+                elif self.request_stop_representation:
+                    func1(*args1)
+                    self.stopRepresentation()
                     smart_update_label(label_status_acquisition, "Analysis in progress...", "purple")
                     func2(*args2)
                     smart_update_label(label_status_acquisition, "Acquisition stopped", "black")
-            except:
-                self.analysis_error()
+            except tk.TclError as e:
+                #print(f"TclError: {e}")
+                pass
+            except Exception as e:
+                #print(f"Exception: {e}")
+                self.analysisError()
 
-        func = partial(self.run, func1, args1, func2, args2)
-        self.after_id = root.after(self.time_sleep, func)
+            func = partial(self.run, func1, args1, func2, args2)
+            self.after_id = root.after(self.time_sleep, func)
 
 
-    def analysis_error(self):
+    def analysisError(self):
         smart_update_label(label_status_acquisition, "Error in analysis!", "red")
+        self.stopRepresentation()
         if not check_device_connection():
-            self.force_stop_representation()
             close_device_connection()
             func_Focus_combobox_menu_device(None)
 
 
-    def initialization_raw_data(self, max_num_samples):
+    def initializationRawData(self, max_num_samples):
         raw_data = RawData()
         raw_data["initial_time"] = 0.0
-        raw_data["unsliced_time"] = np.zeros(max_num_samples)
-        raw_data["unsliced_lc"] = np.zeros((len(info_load_cells), max_num_samples)),
+        raw_data["unsliced_time"] = np.zeros(max_num_samples, dtype=float)
+        raw_data["unsliced_lc"] = np.zeros((len(info_load_cells), max_num_samples), dtype=float)
         raw_data["size"] = 0
         raw_data["max_size"] = max_num_samples
         self.raw_data = raw_data
-        
     
 
-    def test_normal_jump(self):
-        if not (self.jump_data and isinstance(self.jump_data["mass"], int) and self.jump_data["mass"]>0): return
+    def launchAnalysis(self, x, y, labels, default_min, default_max, analyze_callback):
 
-        max_num_samples=50000
-        # --------------------------------------------
-        clear_frame(frame_control_test)
-        automatic_scaling()
-        # --------------------------------------------
-        clear_frame(frame_indicator)
+        def find_intervals_for_vectors(matrix, range_mask):
+            if matrix.size==0: return []
 
+            intervals = []
+            
+            for i in range(matrix.shape[0]):
+                vector = matrix[i]
+                mask = (vector >= range_mask[0]) & (vector <= range_mask[1])
+                vector_intervals = set()
+                start = None
+
+                for j, val in enumerate(mask):
+                    if val and start is None:
+                        start = j
+                    elif not val and start is not None:
+                        vector_intervals.add((start, j-1))
+                        start = None
+                if start is not None: vector_intervals.add((start, len(mask)-1))
+                
+                intervals.append((vector_intervals))
+            
+            return intervals
+
+
+
+        def range_intersection(intervals):
+            start = max(i[0] for i in intervals)
+            end = min(i[1] for i in intervals)
+            if start <= end: return (start, end)
+            return None
+
+        def range_union(intervals):
+            start = min(i[0] for i in intervals)
+            end = max(i[1] for i in intervals)
+            if start <= end: return (start, end)
+            return None
+
+        def overlaps(a, b):
+            return not (a[1] < b[0] or a[0] > b[1])
+
+        def find_valid_non_overlapping_intervals(sets, min_len=1, max_len=float("inf")):
+            preliminary = []
+
+            # FASE 1: Trova tutte le intersezioni valide con lunghezza ammessa
+            for combo in product(*sets):
+                intersection_range = range_intersection(combo)
+                if intersection_range:
+                    length = intersection_range[1] - intersection_range[0] + 1
+                    if min_len <= length <= max_len:
+                        union_range = range_union(combo)
+                        if union_range:
+                            preliminary.append((intersection_range, combo, union_range))
+
+
+            # FASE 2: Costruisci grafo dei conflitti tra le union_range
+            n = len(preliminary)
+            conflict_graph = {i: set() for i in range(n)}
+
+            for i in range(n):
+                for j in range(i + 1, n):
+                    if overlaps(preliminary[i][2], preliminary[j][2]):
+                        conflict_graph[i].add(j)
+                        conflict_graph[j].add(i)
+
+
+            # FASE 3: Trova insiemi conflittuali (componenti connesse > 1 → vanno eliminate)
+            visited = set()
+            to_remove = set()
+
+            def dfs(node, component):
+                if node in visited:
+                    return
+                visited.add(node)
+                component.append(node)
+                for neighbor in conflict_graph[node]:
+                    dfs(neighbor, component)
+
+            for i in range(n):
+                if i not in visited:
+                    component = []
+                    dfs(i, component)
+                    if len(component) > 1:
+                        to_remove.update(component)
+
+
+            # FASE 4: Ritorna solo quelli non coinvolti nei conflitti
+            final = [
+                (inter, combo)
+                for idx, (inter, combo, _) in enumerate(preliminary)
+                if idx not in to_remove
+            ]
+
+            return final
+
+        range_mask_min = tk.DoubleVar(value=default_min)
+        range_mask_max = tk.DoubleVar(value=default_max)
+
+        win = tk.Toplevel(root)
+        win.title("Data Analyzed")
+
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        lines = [ax.plot(x, y_row, label=label)[0] for y_row, label in zip(y, labels)]
+        visible_window = 5000 if len(x) >= 5000 else len(x) # 5000 is the number of visible samples
+        ax.set_xlim(0, x[visible_window-1])
+        offset_ylim = 2
+        ax.set_ylim(np.min(y)-offset_ylim, np.max(y)+offset_ylim)
+        ax.legend(loc="upper right")
+
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.grid(row=0, column=1, sticky="nsew")
+
+        # Linee orizzontali fucsia e verde
+        lines_range = {
+            "min": ax.axhline(range_mask_min.get(), color='fuchsia', linestyle='--'),
+            "max": ax.axhline(range_mask_max.get(), color='green', linestyle='--')
+        }
+
+        highlighted_patches = []
+        selected_interval_idx = 0
+        current_intervals = []
+
+        def update_lines():
+            lines_range["min"].set_ydata([range_mask_min.get()])
+            lines_range["max"].set_ydata([range_mask_max.get()])
+
+        def refresh_intervals(updating_from):
+            nonlocal current_intervals
+            nonlocal selected_interval_idx
+
+            min_val = range_mask_min.get()
+            max_val = range_mask_max.get()
+
+            # Blocca min <= max
+            if min_val > max_val:
+                if updating_from:
+                    if updating_from == "min":
+                        min_val = max_val
+                        range_mask_min.set(min_val)
+                    elif updating_from == "max":
+                        max_val = min_val
+                        range_mask_max.set(max_val)
+                else:
+                    raise Exception("Problem with Scale min/max limits")
+
+            # Aggiorna linee
+            lines_range["min"].set_ydata([min_val])
+            lines_range["max"].set_ydata([max_val])
+
+            intervals = find_intervals_for_vectors(y, (min_val, max_val))
+            valid = find_valid_non_overlapping_intervals(intervals)
+            current_intervals = sorted(valid, key=lambda x: x[0][0])
+
+            #print(current_intervals)
+            
+            selected_interval_idx = 0
+
+            for patch in highlighted_patches:
+                patch.remove()
+            highlighted_patches.clear()
+
+
+            for i, ((start, end), _) in enumerate(current_intervals):
+                color = 'lightcoral' if i == selected_interval_idx else 'lightblue'
+                patch = ax.axvspan(start, end, color=color, alpha=0.3, zorder=0)
+                highlighted_patches.append(patch)
+
+            fig.canvas.draw_idle()
+
+        def on_scroll_min(_):
+            update_lines()
+            refresh_intervals(updating_from="min")
+
+        def on_scroll_max(_):
+            update_lines()
+            refresh_intervals(updating_from="max")
+
+        # --- Layout dinamico ---
+        win.columnconfigure(1, weight=1)
+        win.rowconfigure(0, weight=1)
+
+        # Scroll verticali a sinistra e destra
+        offset_scroll = 1
+        min_scroll = ttk.Scale(win, from_=np.max(y)+offset_scroll, to=np.min(y)-offset_scroll, variable=range_mask_min,
+                        orient='vertical', command=on_scroll_min)
+        max_scroll = ttk.Scale(win, from_=np.max(y)+offset_scroll, to=np.min(y)-offset_scroll, variable=range_mask_max,
+                            orient='vertical', command=on_scroll_max)
+
+        min_scroll.grid(row=0, column=0, sticky="ns", padx=(5, 0))
+        max_scroll.grid(row=0, column=2, sticky="ns", padx=(0, 5))
+
+        # Scroll orizzontale per muovere il grafico
+        scroll_var = tk.DoubleVar(value=0)
+
+        def update_xlim(val):
+            start = int(scroll_var.get())
+            ax.set_xlim(x[start], x[start + visible_window - 1])
+            fig.canvas.draw_idle()
+
+        scrollbar = ttk.Scale(win, from_=0, to=len(x)-visible_window,
+                            variable=scroll_var, orient='horizontal', command=update_xlim)
+        scrollbar.grid(row=1, column=0, columnspan=3, sticky="ew", pady=5)
+
+        def on_click(event):
+            nonlocal selected_interval_idx
+            if not current_intervals or event.inaxes != ax:
+                return
+            clicked_x = int(event.xdata)
+            for i, ((start, end), _) in enumerate(current_intervals):
+                if start <= clicked_x <= end:
+                    prev = selected_interval_idx
+                    selected_interval_idx = i
+                    highlighted_patches[prev].set_color('lightblue')
+                    highlighted_patches[i].set_color('lightcoral')
+                    fig.canvas.draw_idle()
+                    break
+
+        fig.canvas.mpl_connect('button_press_event', on_click)
+
+        def confirm_selection():
+            win.destroy()
+            if current_intervals:
+                analyze_callback(current_intervals[selected_interval_idx][0],
+                                current_intervals[selected_interval_idx][1])
+
+        analyze_button = ttk.Button(win, text="Analyze", command=confirm_selection)
+        analyze_button.grid(row=2, column=0, columnspan=3, pady=10)
+
+        # Inizializzazione
+        update_lines()
+        refresh_intervals(updating_from=None)
+    
+    
+    def testNormalJump(self):
+        if not (self.jump_data and isinstance(self.jump_data["mass"], float) and self.jump_data["mass"]>0): raise ValueError("Invalid mass data")
+
+        # --------------------------------------------
         label_frame_indicator_general_data = tk.LabelFrame(frame_indicator, text=f"General data", padx=10, pady=10)
         label_frame_indicator_general_data.pack(fill="both")
 
@@ -402,18 +596,15 @@ class DataProcessor():
         for k in info_load_cells:
             label_indicator_jump_power[k].pack(side=tk.LEFT, padx=20)
     
-
-        automatic_scaling()
         # --------------------------------------------
-        clear_frame(frame_chart)
-
-        fig, axes = plt.subplots(len(info_load_cells), 1, figsize=(5, 2 * len(info_load_cells)))
+        n = len(info_load_cells)
+        cols = 1 if n == 1 else 2
+        rows = math.ceil(n / cols)
+        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 2.5 * rows))
         fig.tight_layout()  # Improve the layout
         fig.subplots_adjust(hspace=0.50)  # Increase vertical space between charts
 
-        if len(info_load_cells) == 1:
-            axes = [axes]  # If there is only one graph, convert it to a list for consistency
-
+        axes = np.atleast_1d(axes).flatten()
         axes = {k: ax for ax, k in zip(axes, info_load_cells)}
 
         # Creating empty lines
@@ -434,114 +625,36 @@ class DataProcessor():
         toolbar = NavigationToolbar2Tk(canvas, frame_chart)
         toolbar.pack(side=tk.TOP, fill=tk.X)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-        automatic_scaling()
         # --------------------------------------------
-        def launch_analysis():
-            range_min, range_max = np.iinfo(np.int32).min, 60 # Newton
-            visible_window = 5000 # Num visible samples
-
-            # Trova intervalli con valori compresi nel range su **almeno una** serie
-            mask = ((y >= range_min) & (y <= range_max)).any(axis=0)
-            intervals = []
-            start = None
-            for i, val in enumerate(mask):
-                if val and start is None:
-                    start = i
-                elif not val and start is not None:
-                    if i - start > 10:
-                        intervals.append((start, i))
-                    start = None
-            if start is not None and (len(mask) - start > 10):
-                intervals.append((start, len(mask)))
-
-
-            selected_interval_idx = [0]  # initialize with first range selected
-
-            win = tk.Toplevel(root)
-            win.title("Data Analyzed")
-
-            fig, ax = plt.subplots(figsize=(10, 4))
-            lines = [ax.plot(self.raw_data["time"], y_row, label=label)[0] for y_row, label in zip(self.raw_data["lc"], info_load_cells)]
-            ax.set_xlim(0, visible_window)
-            ax.legend(loc="upper right")
-
-            highlighted_patches = []
-
-            if intervals:
-                for i, (start, end) in enumerate(intervals):
-                    color = 'lightcoral' if i == selected_interval_idx[0] else 'lightblue'
-                    patch = ax.axvspan(start, end, color=color, alpha=0.3, zorder=0)
-                    highlighted_patches.append(patch)
-            else:
-                # No interval: you could optionally show a message
-                # print("No ranges found.")
-                pass
-
-            canvas = FigureCanvasTkAgg(fig, master=win)
-            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
-
-            def update_xlim(val):
-                start = int(scroll_var.get())
-                ax.set_xlim(start, start + visible_window)
-                fig.canvas.draw_idle()
-
-            scroll_var = tk.DoubleVar(value=0)
-            scrollbar = ttk.Scale(win, from_=0, to=len(self.raw_data["time"]) - visible_window,
-                                variable=scroll_var, orient='horizontal', command=update_xlim)
-            scrollbar.pack(fill=tk.X)
-
-            def on_click(event):
-                if not intervals or event.inaxes != ax:
-                    return
-                clicked_x = int(event.xdata)
-                for i, (start, end) in enumerate(intervals):
-                    if start <= clicked_x <= end:
-                        # update selection
-                        prev = selected_interval_idx[0]
-                        selected_interval_idx[0] = i
-                        highlighted_patches[prev].set_color('lightblue')
-                        highlighted_patches[i].set_color('lightcoral')
-                        fig.canvas.draw_idle()
-                        break
-
-            fig.canvas.mpl_connect('button_press_event', on_click)
-
-            def confirm_selection():
-                if intervals:
-                    start, end = intervals[selected_interval_idx[0]]
-                else:
-                    start, end = -1, -1
-                win.destroy()
-                analyze_callback(start, end)
-
-            analyze_button = ttk.Button(win, text="Analyze", command=confirm_selection)
-            analyze_button.pack(pady=10)
         
-        def analyze_callback(start, end):
-            if start !=-1 and end != -1:
-                data = {}
-                
-                data["first_touch"]=self.raw_data["time"][end]
-                data["jump_time"]=data["first_touch"]-self.raw_data["time"][start]
+        
+        def analyze_callback(interval, associated_interval):
+            start, end = interval
 
-                data["jump_height"]=(1/2)*self.jump_data["acceleration_of_gravity"]*((data["jump_time"]/2)**2)
+            data = {}
+            
+            data["first_touch"]=self.raw_data["time"][end]
+            data["jump_time"]=data["first_touch"]-self.raw_data["time"][start]
 
-                for k in info_load_cells: 
-                    data["jump_power"][k] = (self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]*data["jump_height"])/(data["jump_time"][k]/2)
-                
-                data["jump_power_AVG"]=sum(data["jump_power"].values())/len(data["jump_power"])
+            data["jump_height"]=(1/2)*self.jump_data["acceleration_of_gravity"]*((data["jump_time"]/2)**2)
+
+            data["jump_power"] = {}
+            for i, k in enumerate(info_load_cells): 
+                jump_time = self.raw_data["time"][associated_interval[i][1]]-self.raw_data["time"][associated_interval[i][0]]
+                data["jump_power"][k] = (self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]*data["jump_height"])/(jump_time/2)
+            
+            data["jump_power_AVG"]=sum(data["jump_power"].values())/len(data["jump_power"])
 
 
-                smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
-                smart_update_label(label_indicator_jump_height, f"Jump height: {round(data["jump_height"]*100,2)} cm", "black")
+            smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
+            smart_update_label(label_indicator_jump_height, f"Jump height: {round(data["jump_height"]*100,2)} cm", "black")
 
-                smart_update_label(label_indicator_jump_time_AVG, f"Jump time: {round(data["jump_time"], 5)} s", "black")
+            smart_update_label(label_indicator_jump_time_AVG, f"Jump time: {round(data["jump_time"], 5)} s", "black")
 
-                smart_update_label(label_indicator_first_touch, f"First touch: {round(data["first_touch"], 5)} s", "black")
+            smart_update_label(label_indicator_first_touch, f"First touch: {round(data["first_touch"], 5)} s", "black")
 
-                #for k in info_load_cells: smart_update_label(label_indicator_jump_power[k], f"Jump power {k}: {round(data["jump_power"][k], 3)} N", "black")
-                #smart_update_label(label_indicator_jump_power_AVG, f"Jump power AVG: {round(data["jump_power_AVG"], 3)} N", "black")
+            for k in info_load_cells: smart_update_label(label_indicator_jump_power[k], f"Jump power {k}: {round(data["jump_power"][k], 3)} N", "black")
+            smart_update_label(label_indicator_jump_power_AVG, f"Jump power AVG: {round(data["jump_power_AVG"], 3)} N", "black")
 
 
 
@@ -555,39 +668,23 @@ class DataProcessor():
 
         def func2():
             if not (self.raw_data and self.raw_data["size"]>0): return 
-
             clear_frame(frame_control_test)
-            analyze_btn = ttk.Button(root, text="Analyze data", command=launch_analysis)
+            analyze_btn = ttk.Button(frame_control_test, text="Analyze data", command=lambda: self.launchAnalysis(self.raw_data["time"], self.raw_data["lc"], info_load_cells, 0, 13, analyze_callback))
             analyze_btn.pack(padx=20, pady=20)
             automatic_scaling()           
-     
 
-
-        self.start_representation(max_num_samples, func1, (), func2, ())
+        return 50000, func1, (), func2, ()
     
 
-
-    def test_calculate_mass(self):
+    def testCalculateMass(self):
         self.jump_data["mass"] = 0.0
 
-        max_num_samples=50000
-
         # --------------------------------------------
-        clear_frame(frame_control_test)
-        automatic_scaling()
-        # --------------------------------------------
-        clear_frame(frame_indicator)
-
         label_indicator_number_samples = tk.Label(frame_indicator, text=f"Number of samples collected: {0}", font=("Arial", 12))
         label_indicator_number_samples.grid(row=0, column=0)
         label_indicator_mass = tk.Label(frame_indicator, text=f"Mass: {self.jump_data['mass']} Kg", font=("Arial", 12))
         label_indicator_mass.grid(row=1, column=0, pady=10)
-    
-
-        automatic_scaling()
         # --------------------------------------------
-        clear_frame(frame_chart)
-
         fig, axis = plt.subplots(1, 1, figsize=(5, 2))
         fig.tight_layout()  # Improve the layout
         fig.subplots_adjust(hspace=0.50)  # Increase vertical space between charts
@@ -609,68 +706,75 @@ class DataProcessor():
         toolbar = NavigationToolbar2Tk(canvas, frame_chart)
         toolbar.pack(side=tk.TOP, fill=tk.X)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-        automatic_scaling()
         # --------------------------------------------
-
 
         def func1():
             smart_update_label(label_indicator_number_samples, f"Number of samples collected: {self.raw_data["size"]}", "black")
+
+
+        def func2():
             line.set_data(self.raw_data["time"], np.sum(self.raw_data["lc"], axis=0))
             axis.relim()
             axis.autoscale_view()
             canvas.draw()
 
+            if self.raw_data["size"]==0: return 
 
-        def func2():
-            if not (self.raw_data): return 
+            self.jump_data["mass"] = np.mean(np.sum(self.raw_data["lc"], axis=0))/self.jump_data["acceleration_of_gravity"]
+            smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
 
-            if self.raw_data["time"] and self.raw_data["lc"]:
-                self.jump_data["mass"] = np.mean(np.sum(self.raw_data["lc"], axis=0))/self.jump_data["acceleration_of_gravity"]
-                smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
+     
+        return 50000, func1, (), func2, ()
 
 
-        self.start_representation(max_num_samples, func1, (), func2, ())
-    
-
-    def start_representation(self, max_num_samples, func1, args1, func2, args2):
+    def startRepresentation(self, test):
         smart_update_label(label_status_acquisition, "Initialization...", "black")
-        self.force_stop_representation()
-        data_acquirer.stop_acquisition()
+        self.stopRepresentation()
+        data_acquirer.stopAcquisition()
         data_dq.clear()
-        self.initialization_raw_data(max_num_samples)
-        data_acquirer.start_acquisition()
-        self.fs_representation=False
-        self.representation=True
 
-        func = partial(self.run, func1, args1, func2, args2)
-        self.after_id = root.after(self.time_sleep, func)
+        clear_frame(frame_control_test)
+        clear_frame(frame_indicator)
+        clear_frame(frame_chart)
+        try:
+            max_num_samples, func1, args1, func2, args2 = test()
+            automatic_scaling()
 
-    def stop_representation(self):
-        data_acquirer.stop_acquisition()
-        self.representation=False
+            self.initializationRawData(max_num_samples)
+            data_acquirer.startAcquisition()
+            self.stop_representation=False
+            self.request_stop_representation=False
+            func = partial(self.run, func1, args1, func2, args2)
+            self.after_id = root.after(self.time_sleep, func)
+        except ValueError as e: 
+            self.analysisError()
+            show_warning("Attention!", e)
 
-    def force_stop_representation(self):
-        self.fs_representation=True
-        self.stop_representation()
+        
 
-    def stop_representation_activity(self):
+    def requestStopRepresentation(self):
+        data_acquirer.stopAcquisition()
+        self.request_stop_representation=True
+
+    def stopRepresentation(self):
         try: root.after_cancel(self.after_id)
         except: pass
-        self.force_stop_representation()
+        self.stop_representation=True
+        self.requestStopRepresentation()
+
     
-    def add_data(self, data):
+    def addData(self, data):
         if self.raw_data and data:
-            data_lc = data["lc"]
-            if None not in data_lc["values"].values():
+            data_lc = data["response"]["lc"]
+            if None not in list(data_lc["values"].values()):
                 if self.raw_data["size"]<self.raw_data["max_size"]:
-                    if self.raw_data["size"]:  self.raw_data["initial_time"] = data_lc["time"]
+                    if self.raw_data["size"]==0:  self.raw_data["initial_time"] = data_lc["time"]
                     self.raw_data["unsliced_time"][self.raw_data["size"]] = data_lc["time"]-self.raw_data["initial_time"]
-                    for i, k in enumerate(info_load_cells): self.raw_data["unsliced_lc"][i][self.raw_data["size"]] = data_lc["values"][k]
+                    for i, k in enumerate(info_load_cells): self.raw_data["unsliced_lc"][i, self.raw_data["size"]] = data_lc["values"][k]
                     self.raw_data["size"] += 1
                 else:
                     show_warning("Attention!", "You have reached the maximum number of saveable champions.")
-                    self.force_stop_representation()
+                    self.stopRepresentation()
 
 
 
@@ -688,39 +792,43 @@ class DataAcquirer(threading.Thread):
         self.time_sleep_acquiring=0.0
         self.time_sleep_not_acquiring=0.3
 
-        self._stop_acquisition()
+        self._stopAcquisition()
     
     def run(self):
         while self.acquisition_activity:
             with self.acquiring:
                 if self.acquisition:
                     try: data_dq.append(arduino.write_and_read({"command":"get_data"}))
-                    except: 
+                    except Exception as e: 
+                        #print(e)
                         data_dq.append(None)
-                        self._stop_acquisition()
+                        self._stopAcquisition()
 
             if self.acquisition: time.sleep(self.time_sleep_acquiring)
             else: time.sleep(self.time_sleep_not_acquiring)
 
 
-    def _start_acquisition(self):
+    def _startAcquisition(self):
         self.acquisition=True
 
-    def start_acquisition(self):
+    def startAcquisition(self):
         with self.acquiring:
-            self._start_acquisition()
+            self._startAcquisition()
 
-    def _stop_acquisition(self):
+    def _stopAcquisition(self):
         self.acquisition=False
 
-    def stop_acquisition(self):
+    def stopAcquisition(self):
         with self.acquiring: 
-            self._stop_acquisition()
+            self._stopAcquisition()
 
-    def stop_acquisition_activity(self):
+    def stopAcquisitionActivity(self):
         self.acquisition_activity=False
-        self._stop_acquisition()
+        self._stopAcquisition()
     
+
+
+
 
 
 
@@ -749,14 +857,15 @@ def get_connected_USB_devices():
         #print("No valid USB device found.")
         pass
 
-    list_info_device = list_device
+    list_info_device = [{"port": "prova"}]
+    #list_info_device = list_device
 
 def open_device_connection(info_device, timeout):
-    global arduino, data_jump
+    global arduino
     close_device_connection()
     smart_update_label(label_status_connection, "Connecting...", "orange")
     try: 
-        arduino = Arduino(info_device, timeout) 
+        arduino = ArduinoEmulate(info_device, timeout) 
         arduino.open_connection()
         if check_device_connection():
             get_info_load_cells()
@@ -769,6 +878,7 @@ def open_device_connection(info_device, timeout):
         func_Focus_combobox_menu_device(None)
 
 def clear_frame(frame):
+    #print(f"CLEAR: {frame}")
     for widget in frame.winfo_children(): widget.destroy()
     automatic_scaling()
     
@@ -777,7 +887,7 @@ def close_device_connection():
     smart_update_label(label_status_acquisition, "Acquisition stopped", "black")
     smart_update_label(label_status_connection, "Disconnecting...", "black")
     smart_update_label(label_scale_tare, "Not calibrated!", "red")
-    data_processor.force_stop_representation()
+    data_rappresentor.stopRepresentation()
     if arduino is not None: arduino.close_connection()
     check_device_connection()
 
@@ -805,19 +915,18 @@ def check_device_connection():
     smart_update_label(label_status_connection, "Not Connected", "red")
     return False
 
-def command_button_test(test, args):
-    if check_device_connection() and info_load_cells: test(*args)
+def command_button_test(test):
+    if check_device_connection() and info_load_cells: data_rappresentor.startRepresentation(test)
     else: 
         close_device_connection()
         func_Focus_combobox_menu_device(None)
 
 def command_button_stop_test():
-    data_processor.stop_representation()
+    data_rappresentor.requestStopRepresentation()
 
 def func_WM_DELETE_WINDOW():
-    data_processor.force_stop_representation()
-    data_processor.stop_representation_activity()
-    data_acquirer.stop_acquisition_activity()
+    data_rappresentor.stopRepresentation()
+    data_acquirer.stopAcquisitionActivity()
     data_acquirer.join()
     close_device_connection()
     root.quit()
@@ -828,13 +937,14 @@ def command_button_scale_tare():
 
     if check_device_connection():
         try:
-            result = arduino.write_and_read({"command":"scale_tare"})["lc"]
+            result = arduino.write_and_read({"command":"scale_tare"})["response"]["lc"]
             result_string = ""
-            for i, k in enumerate(info_load_cells.keys()):
+            for i, k in enumerate(info_load_cells):
                 result_string += f"{k}: {result[k]}"
                 if i < len(info_load_cells)-1: result_string += " | "
             smart_update_label(label_scale_tare, result_string, "black")
-        except:
+        except Exception as e:
+            #print(e)
             smart_update_label(label_scale_tare, "Not calibrated!", "red")
     else: 
         close_device_connection()
@@ -877,6 +987,49 @@ def get_info_load_cells():
 
 # ----------------------
 
+stringa_scritta = ""
+class ArduinoEmulate(USBIODevice):
+    def __init__(self, info_device={}, device_timeout=5):
+        super().__init__(info_device, device_timeout)
+    
+    def _reset_buffer(self):
+        pass
+
+    def _check_connection(self):
+        return True
+    
+    def _close_connection(self):
+        pass
+    
+    def _open_connection(self):
+        return None
+
+    
+    def _read(self):
+        #time.sleep(1)
+        #print("read: "+stringa_scritta)
+        import random
+        if "get_data" in stringa_scritta:
+            return {"code":"OK", "response":{"lc":{"values":{"LX":random.randint(1, 10), "RX":random.randint(1, 10), "UP":random.randint(1, 10), "DW":random.randint(1, 10)}, "time": time.time()}}}
+        elif "scale_tare" in stringa_scritta:
+            return {"code":"OK", "response":{"lc":{"LX":"OK", "RX":"OK", "UP":"OK", "DW":"OK"}}}
+        elif "is_alive" in stringa_scritta:
+            return {"code":"OK"}
+        elif "get_info" in stringa_scritta:
+            return {"code":"OK", "lc": ["LX", "RX", "UP", "DW"]}
+    
+    def _write(self, data):
+        global stringa_scritta
+        stringa_scritta = f"?{json.dumps(data)}!"
+        #print("write: "+stringa_scritta)
+
+
+
+
+
+
+# ------------------------------------
+
 info_load_cells = []
 list_info_device = []
 
@@ -884,7 +1037,7 @@ root = tk.Tk()
 arduino = None
 data_dq = deque()
 data_acquirer = DataAcquirer()
-data_processor = DataProcessor()
+data_rappresentor = DataRappresentor()
 
 
 # Creation of main window
@@ -921,14 +1074,19 @@ label_scale_tare.pack(side=tk.LEFT, padx=20)
 frame_acquisition = tk.Frame(root)
 frame_acquisition.pack(pady=10)
 
-button_test_normal_jump = tk.Button(frame_acquisition, text="Normal jump", command=lambda: command_button_test(data_processor.test_normal_jump, ()))
-button_test_normal_jump.grid(row=0, column=0)
-button_test_calculate_mass = tk.Button(frame_acquisition, text="Calculate mass", command=lambda: command_button_test(data_processor.test_calculate_mass, ()))
-button_test_calculate_mass.grid(row=0, column=1)
+button_test_normal_jump = tk.Button(frame_acquisition, text="Normal jump", command=lambda: command_button_test(data_rappresentor.testNormalJump))
+button_test_normal_jump.pack(side=tk.LEFT, padx=20)
+button_test_calculate_mass = tk.Button(frame_acquisition, text="Calculate mass", command=lambda: command_button_test(data_rappresentor.testCalculateMass))
+button_test_calculate_mass.pack(side=tk.LEFT, padx=20)
 button_stop_test = tk.Button(frame_acquisition, text="Stop test", command=command_button_stop_test)
-button_stop_test.grid(row=0, column=2)
-label_status_acquisition = tk.Label(frame_acquisition, text=f"Acquisition status: Stop", font=("Arial", 15))
-label_status_acquisition.grid(row=1, column=1, pady=10)
+button_stop_test.pack(side=tk.LEFT, padx=20)
+button_force_stop = tk.Button(frame_acquisition, text="Force stop", command=data_rappresentor.stopRepresentation)
+button_force_stop.pack(side=tk.LEFT, padx=20)
+
+frame_acquisition_status = tk.Frame(root)
+frame_acquisition_status.pack(pady=10)
+label_status_acquisition = tk.Label(frame_acquisition_status, text=f"Acquisition status: Stop", font=("Arial", 15))
+label_status_acquisition.pack(side=tk.LEFT, padx=20)
 
 # Control test section
 frame_control_test = tk.Frame(root)
