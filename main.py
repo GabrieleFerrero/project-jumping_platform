@@ -13,7 +13,8 @@ import queue
 import numpy as np
 from collections import deque
 from functools import partial
-from itertools import product
+from scipy.signal import savgol_filter
+from matplotlib.patches import Rectangle
 import math
 
 
@@ -308,6 +309,8 @@ class DataRappresentor():
             except Exception as e:
                 #print(f"Exception: {e}")
                 self.analysisError()
+                func1(*args1)
+                func2(*args2)
 
             func = partial(self.run, func1, args1, func2, args2)
             self.after_id = root.after(self.time_sleep, func)
@@ -329,273 +332,472 @@ class DataRappresentor():
         raw_data["size"] = 0
         raw_data["max_size"] = max_num_samples
         self.raw_data = raw_data
-    
 
-    def launchAnalysis(self, x, y, labels, default_min, default_max, analyze_callback):
 
-        def find_intervals_for_vectors(matrix, range_mask):
-            if matrix.size==0: return []
 
-            intervals = []
-            
-            for i in range(matrix.shape[0]):
-                vector = matrix[i]
-                mask = (vector >= range_mask[0]) & (vector <= range_mask[1])
-                vector_intervals = set()
-                start = None
+        
+    def analysisJumpPhase(self, analysis_result_calculation, analysis_callback, additional_params):
 
-                for j, val in enumerate(mask):
-                    if val and start is None:
-                        start = j
-                    elif not val and start is not None:
-                        vector_intervals.add((start, j-1))
-                        start = None
-                if start is not None: vector_intervals.add((start, len(mask)-1))
+        def data_analysis():
+            nonlocal results_analysis
+
+            if selection_area["start"] is None or selection_area["end"] is None: return
+
+            for artist in plotted_elements["data_analysis"]: artist.remove()
+            plotted_elements["data_analysis"].clear()
+
+            results_analysis = None
+
+            try:
+
+                selected_time = self.raw_data["time"][selection_area["start"]:selection_area["end"]+1]
+                selected_lc = self.raw_data["lc"][:, selection_area["start"]:selection_area["end"]+1]
+                selected_force = np.sum(selected_lc, axis=0)
                 
-                intervals.append((vector_intervals))
-            
-            return intervals
+                if entries_params["use_filter"]["info"]["value"]:
+                    selected_force_filtered = savgol_filter(selected_force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
+                    plotted_elements["data_analysis"].append(ax.plot(selected_time, selected_force_filtered, label='Filtered force', color='gray')[0])
+                    selected_force = selected_force_filtered
+                                    
+                results_analysis, plot_el = analysis_result_calculation(selected_force, selected_time, selection_area["start"], ax, entries_params)
+                plotted_elements["data_analysis"] += plot_el
+
+                update_plot()
+
+            except: show_warning("Error", "Problem in the analyses")
 
 
+        def clear_plotted_analysis_elements():
+            for artist in plotted_elements["on_motion"]: artist.remove()
+            plotted_elements["on_motion"].clear()
 
-        def range_intersection(intervals):
-            start = max(i[0] for i in intervals)
-            end = min(i[1] for i in intervals)
-            if start <= end: return (start, end)
-            return None
+            for artist in plotted_elements["on_release"]: artist.remove()
+            plotted_elements["on_release"].clear()
 
-        def range_union(intervals):
-            start = min(i[0] for i in intervals)
-            end = max(i[1] for i in intervals)
-            if start <= end: return (start, end)
-            return None
+            for artist in plotted_elements["data_analysis"]: artist.remove()
+            plotted_elements["data_analysis"].clear()
 
-        def overlaps(a, b):
-            return not (a[1] < b[0] or a[0] > b[1])
-
-        def find_valid_non_overlapping_intervals(sets, min_len=1, max_len=float("inf")):
-            preliminary = []
-
-            # FASE 1: Trova tutte le intersezioni valide con lunghezza ammessa
-            for combo in product(*sets):
-                intersection_range = range_intersection(combo)
-                if intersection_range:
-                    length = intersection_range[1] - intersection_range[0] + 1
-                    if min_len <= length <= max_len:
-                        union_range = range_union(combo)
-                        if union_range:
-                            preliminary.append((intersection_range, combo, union_range))
+            update_plot()
 
 
-            # FASE 2: Costruisci grafo dei conflitti tra le union_range
-            n = len(preliminary)
-            conflict_graph = {i: set() for i in range(n)}
-
-            for i in range(n):
-                for j in range(i + 1, n):
-                    if overlaps(preliminary[i][2], preliminary[j][2]):
-                        conflict_graph[i].add(j)
-                        conflict_graph[j].add(i)
+        def update_plot():
+            update_legend()
+            ax.relim()
+            ax.autoscale_view(scalex=False, scaley=True)
+            canvas.draw()
 
 
-            # FASE 3: Trova insiemi conflittuali (componenti connesse > 1 → vanno eliminate)
-            visited = set()
-            to_remove = set()
+        def update_view_x(start_visible_time):
+            total_duration = self.raw_data["time"][-1] - self.raw_data["time"][0]
+            visible_duration = total_duration if total_duration < entries_params["window_duration"]["info"]["value"] else entries_params["window_duration"]["info"]["value"]
+            scroll.config(to=self.raw_data["time"][-1]-entries_params["window_duration"]["info"]["value"])
 
-            def dfs(node, component):
-                if node in visited:
-                    return
-                visited.add(node)
-                component.append(node)
-                for neighbor in conflict_graph[node]:
-                    dfs(neighbor, component)
+            ax.set_xlim(start_visible_time, start_visible_time+visible_duration)
+            update_plot()
 
-            for i in range(n):
-                if i not in visited:
-                    component = []
-                    dfs(i, component)
-                    if len(component) > 1:
-                        to_remove.update(component)
-
-
-            # FASE 4: Ritorna solo quelli non coinvolti nei conflitti
-            final = [
-                (inter, combo)
-                for idx, (inter, combo, _) in enumerate(preliminary)
-                if idx not in to_remove
-            ]
-
-            return final
-
-        range_mask_min = tk.DoubleVar(value=default_min)
-        range_mask_max = tk.DoubleVar(value=default_max)
-
-        win = tk.Toplevel(root)
-        win.title("Data Analyzed")
-
-
-        fig, ax = plt.subplots(figsize=(10, 4))
-        lines = [ax.plot(x, y_row, label=label)[0] for y_row, label in zip(y, labels)]
-        visible_window = 5000 if len(x) >= 5000 else len(x) # 5000 is the number of visible samples
-        ax.set_xlim(0, x[visible_window-1])
-        offset_ylim = 2
-        ax.set_ylim(np.min(y)-offset_ylim, np.max(y)+offset_ylim)
-        ax.legend(loc="upper right")
-
-        canvas = FigureCanvasTkAgg(fig, master=win)
-        canvas_widget = canvas.get_tk_widget()
-        canvas_widget.grid(row=0, column=1, sticky="nsew")
-
-        # Linee orizzontali fucsia e verde
-        lines_range = {
-            "min": ax.axhline(range_mask_min.get(), color='fuchsia', linestyle='--'),
-            "max": ax.axhline(range_mask_max.get(), color='green', linestyle='--')
-        }
-
-        highlighted_patches = []
-        selected_interval_idx = 0
-        current_intervals = []
-
-        def update_lines():
-            lines_range["min"].set_ydata([range_mask_min.get()])
-            lines_range["max"].set_ydata([range_mask_max.get()])
-
-        def refresh_intervals(updating_from):
-            nonlocal current_intervals
-            nonlocal selected_interval_idx
-
-            min_val = range_mask_min.get()
-            max_val = range_mask_max.get()
-
-            # Blocca min <= max
-            if min_val > max_val:
-                if updating_from:
-                    if updating_from == "min":
-                        min_val = max_val
-                        range_mask_min.set(min_val)
-                    elif updating_from == "max":
-                        max_val = min_val
-                        range_mask_max.set(max_val)
-                else:
-                    raise Exception("Problem with Scale min/max limits")
-
-            # Aggiorna linee
-            lines_range["min"].set_ydata([min_val])
-            lines_range["max"].set_ydata([max_val])
-
-            intervals = find_intervals_for_vectors(y, (min_val, max_val))
-            valid = find_valid_non_overlapping_intervals(intervals)
-            current_intervals = sorted(valid, key=lambda x: x[0][0])
-
-            #print(current_intervals)
-            
-            selected_interval_idx = 0
-
-            for patch in highlighted_patches:
-                patch.remove()
-            highlighted_patches.clear()
-
-
-            for i, ((start, end), _) in enumerate(current_intervals):
-                color = 'lightcoral' if i == selected_interval_idx else 'lightblue'
-                patch = ax.axvspan(start, end, color=color, alpha=0.3, zorder=0)
-                highlighted_patches.append(patch)
-
-            fig.canvas.draw_idle()
-
-        def on_scroll_min(_):
-            update_lines()
-            refresh_intervals(updating_from="min")
-
-        def on_scroll_max(_):
-            update_lines()
-            refresh_intervals(updating_from="max")
-
-        # --- Layout dinamico ---
-        win.columnconfigure(1, weight=1)
-        win.rowconfigure(0, weight=1)
-
-        # Scroll verticali a sinistra e destra
-        offset_scroll = 1
-        min_scroll = ttk.Scale(win, from_=np.max(y)+offset_scroll, to=np.min(y)-offset_scroll, variable=range_mask_min,
-                        orient='vertical', command=on_scroll_min)
-        max_scroll = ttk.Scale(win, from_=np.max(y)+offset_scroll, to=np.min(y)-offset_scroll, variable=range_mask_max,
-                            orient='vertical', command=on_scroll_max)
-
-        min_scroll.grid(row=0, column=0, sticky="ns", padx=(5, 0))
-        max_scroll.grid(row=0, column=2, sticky="ns", padx=(0, 5))
-
-        # Scroll orizzontale per muovere il grafico
-        scroll_var = tk.DoubleVar(value=0)
-
-        def update_xlim(val):
-            start = int(scroll_var.get())
-            ax.set_xlim(x[start], x[start + visible_window - 1])
-            fig.canvas.draw_idle()
-
-        scrollbar = ttk.Scale(win, from_=0, to=len(x)-visible_window,
-                            variable=scroll_var, orient='horizontal', command=update_xlim)
-        scrollbar.grid(row=1, column=0, columnspan=3, sticky="ew", pady=5)
 
         def on_click(event):
-            nonlocal selected_interval_idx
-            if not current_intervals or event.inaxes != ax:
-                return
-            clicked_x = int(event.xdata)
-            for i, ((start, end), _) in enumerate(current_intervals):
-                if start <= clicked_x <= end:
-                    prev = selected_interval_idx
-                    selected_interval_idx = i
-                    highlighted_patches[prev].set_color('lightblue')
-                    highlighted_patches[i].set_color('lightcoral')
-                    fig.canvas.draw_idle()
-                    break
+            nonlocal mouse_start
+
+            if event.inaxes != ax or toolbar.mode != '': return
+
+            legend = ax.get_legend()
+            # Ottieni il bounding box della legenda (in formato [x0, y0, width, height])
+            if legend:
+                bbox = legend.get_window_extent()
+                # Controlla se il click è dentro il bounding box della legenda
+                if bbox.contains(event.x, event.y): return  # Ignora l'evento di click
+
+
+            selection_area["start"], selection_area["end"] = None, None
+
+            clear_plotted_analysis_elements()
+            mouse_start = event.xdata
+
+
+        def on_motion(event):
+            nonlocal mouse_start
+
+            if mouse_start is not None: 
+                for artist in plotted_elements["on_motion"]: artist.remove()
+                plotted_elements["on_motion"].clear()
+                canvas.draw_idle()
+
+            if event.inaxes != ax and mouse_start is not None: mouse_start=None
+            if event.inaxes != ax or mouse_start is None or toolbar.mode != '': return
+
+            x0 = mouse_start
+            x1 = event.xdata
+            xmin, xmax = sorted([x0, x1])
+
+            y_min, y_max = ax.get_ylim()
+            rect = Rectangle((xmin, y_min),
+                            xmax - xmin,
+                            y_max - y_min,
+                            color='gray', alpha=0.3)
+            plotted_elements["on_motion"].append(ax.add_patch(rect))
+            ax.set_ylim(y_min, y_max)
+
+            canvas.draw_idle()
+
+
+        def on_release(event):
+            nonlocal mouse_start
+
+            if mouse_start is not None: clear_plotted_analysis_elements()
+            if event.inaxes != ax and mouse_start is not None: mouse_start=None
+            if event.inaxes != ax or mouse_start is None or toolbar.mode != '': return
+
+            x0 = mouse_start
+            x1 = event.xdata
+            xmin, xmax = sorted([x0, x1])
+
+            mouse_start = None
+
+            selection_area["start"], selection_area["end"] = find_window_indices(self.raw_data["time"], xmin, xmax)
+
+            plotted_elements["on_release"].append(ax.axvline(xmin, color='black', linestyle='--'))
+            plotted_elements["on_release"].append(ax.axvline(xmax, color='black', linestyle='--'))
+            update_plot()
+            apply_params(recalls_actions=False)
+            data_analysis()
+
+
+        def apply_params(recalls_actions=True):
+            changed_params = {}
+            for key, value in entries_params.items():
+                var = value["var"]
+                info_param = value["info"]
+
+                if info_param["ptype"] not in changed_params: changed_params[info_param["ptype"]] = False
+                try:
+                    value = info_param["type"](var.get())
+                    if info_param["cond"](value):
+                        if value != info_param["value"]: changed_params[info_param["ptype"]] = True
+                        info_param["value"] = value
+                    else: show_warning("Error", f"Condition not met for {key}")
+                except ValueError: show_warning("Error", f"Invalid input for {key}")
+
+            if info_param["type"] == int or info_param["type"] == float: var.set(str(info_param["value"]))
+            elif info_param["type"] == bool: var.set(info_param["value"])
+            else: show_warning("Error", f"Parameter type not recognized: {info_param["type"]}")
+
+            if recalls_actions:
+                if "interface" in changed_params and changed_params["interface"]: update_view_x(0)
+                if "processing" in changed_params and changed_params["processing"]: data_analysis()
+
+
+        def add_param(info_param, n_row):
+
+            ttk.Label(param_frame, text=info_param["label"]).grid(row=n_row, column=0, sticky='w', pady=5)
+
+            if info_param["type"] == int or info_param["type"] == float:
+                var = tk.StringVar(value=info_param["value"])
+                ttk.Entry(param_frame, textvariable=var, width=10).grid(row=n_row, column=1, padx=5)
+
+            elif info_param["type"] == bool:
+                var = tk.BooleanVar(value=info_param["value"])
+                tk.Checkbutton(param_frame, variable=var).grid(row=n_row, column=1, sticky='w', pady=5)
+            else: 
+                show_warning("Error", f"Parameter type not recognized: {info_param["type"]}")
+
+            entries_params[info_param["key"]] = {"var":var, "info":info_param}
+
+
+        def confirm_and_close():
+            if selection_area["start"] is None or selection_area["end"] is None or results_analysis is None: return
+            analysis_callback(selection_area["start"], selection_area["end"], results_analysis)
+            #win.destroy()
+
+        
+        def find_window_indices(array, start, end):
+            """
+            Finds the indices (start_index, end_index) for the window 
+            [start, end] within a sorted NumPy array, properly handling bounds.
+            """
+            start_index = np.searchsorted(array, start, side="left")
+            end_index = np.searchsorted(array, end, side="right") - 1
+
+            # Protection from extreme cases
+            start_index = min(start_index, len(array) - 1)
+            end_index = max(end_index, 0)
+
+            return start_index, end_index
+        
+
+        def update_legend():
+            handles, labels = ax.get_legend_handles_labels()
+            legend = ax.legend(handles, labels)
+
+            for handle, label in zip(legend.legendHandles, labels):
+                for artist in ax.get_children():
+                    if hasattr(artist, "get_label") and artist.get_label() == label:
+                        if not hasattr(artist, "_original_alpha"):
+                            artist._original_alpha = artist.get_alpha() or 1.0
+                        is_visible = artist.get_alpha() != 0.0
+                        handle.set_alpha(1.0 if is_visible else 0.2)
+                        handle._linked_artist = artist
+                        handle.set_picker(True)
+                        break
+
+            canvas.draw_idle()
+
+
+        def on_pick(event):
+            legend_handle = event.artist
+            if hasattr(legend_handle, "_linked_artist") and hasattr(legend_handle._linked_artist, "_original_alpha"):
+                artist = legend_handle._linked_artist
+                is_visible = artist.get_alpha() != 0.0
+                artist.set_alpha(0.0 if is_visible else artist._original_alpha)
+                legend_handle.set_alpha(0.2 if is_visible else 1.0)
+                canvas.draw_idle()
+
+        
+        def clear_analysis():
+            nonlocal results_analysis
+            clear_plotted_analysis_elements()
+            selection_area["start"], selection_area["end"] = None, None
+            results_analysis = None
+
+
+
+        # -------------------------------------------
+
+        selection_area = {"start":None, "end":None}
+        params = [
+            {"label":"Savgol Window Length","type":int,"value":11,"key":"savgol_filter_window_length","ptype":"processing","cond":lambda x: 1 <= x <= np.iinfo(np.uint32).max and x % 2 == 1},
+            {"label":"Savgol Polyorder","type":int,"value":3,"key":"savgol_filter_polyorder","ptype":"processing","cond":lambda x: 0 <= x <= np.iinfo(np.uint32).max},
+            {"label":"Enable filter","type":bool,"value":True,"key":"use_filter","ptype":"processing","cond":lambda x: True},
+            {"label":"Window duration (s)","type":float,"value":2,"key":"window_duration","ptype":"interface","cond":lambda x: 0 < x}
+        ]
+        entries_params = {}
+        results_analysis = None
+        mouse_start = None
+        plotted_elements = {
+            "on_motion": [],
+            "on_release": [],
+            "data_analysis": [],
+            "data_input": []
+        }
+
+        win = tk.Toplevel()
+        win.title("Plot Viewer")
+        win.geometry("1000x750")
+        win.grid_columnconfigure(1, weight=1)
+        win.grid_rowconfigure(0, weight=1)
+
+        plot_frame = ttk.Frame(win)
+        plot_frame.grid(row=0, column=1, rowspan=2, sticky="nsew")
+        fig, ax = plt.subplots(figsize=(10, 4))
+        canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+        toolbar = NavigationToolbar2Tk(canvas, plot_frame)
+        toolbar.update()
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(fill=tk.BOTH, expand=True)
+        ax.set_autoscaley_on(True)
+        ax.set_autoscalex_on(False)
+
+        for i, vec in enumerate(self.raw_data["lc"]): plotted_elements["data_input"].append(ax.plot(self.raw_data["time"], vec, label=f"Force {info_load_cells[i]}", alpha=0.3)[0])
+        plotted_elements["data_input"].append(ax.plot(self.raw_data["time"], np.sum(self.raw_data["lc"], axis=0), label="Total force", linewidth=2, color='black', alpha=0.6)[0])
+        ax.grid(True)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("GRF (N)")
 
         fig.canvas.mpl_connect('button_press_event', on_click)
+        fig.canvas.mpl_connect('motion_notify_event', on_motion)
+        fig.canvas.mpl_connect('button_release_event', on_release)
+        fig.canvas.mpl_connect('pick_event', on_pick)
 
-        def confirm_selection():
-            win.destroy()
-            if current_intervals:
-                analyze_callback(current_intervals[selected_interval_idx][0],
-                                current_intervals[selected_interval_idx][1])
+        # ---------------- Scrollbar ----------------
+        scroll = ttk.Scale(plot_frame, from_=0, orient='horizontal', length=800, command=lambda val: update_view_x(float(val)))
+        scroll.pack(fill=tk.X, expand=False)
 
-        analyze_button = ttk.Button(win, text="Analyze", command=confirm_selection)
-        analyze_button.grid(row=2, column=0, columnspan=3, pady=10)
+        # ---------------- Parametri ----------------
+        param_frame = ttk.Frame(win, padding=10)
+        param_frame.grid(row=0, column=0, sticky="ns")
 
-        # Inizializzazione
-        update_lines()
-        refresh_intervals(updating_from=None)
-    
-    
-    def testNormalJump(self):
+        ttk.Label(param_frame, text="Params management:").grid(row=0, column=0, columnspan=2, sticky='ew', pady=10)
+
+        num_row = 1
+        for info_param in params:
+            add_param(info_param, num_row)
+            num_row+=1
+        for info_param in additional_params:
+            add_param(info_param, num_row)
+            num_row+=1
+            
+        ttk.Button(param_frame, text="Apply params", command=apply_params).grid(row=num_row, column=0, columnspan=2, pady=5, sticky="ew")
+        ttk.Button(param_frame, text="Clear analysis", command=clear_analysis).grid(row=num_row+1, column=0, columnspan=2, pady=5, sticky="ew")
+
+        # ---------------- Bottone finale ----------------    
+        ttk.Button(win, text="Calculating values", command=confirm_and_close).grid(row=2, column=1, pady=20)
+
+        # ------------ Default initialization ----------
+        update_view_x(0)
+
+
+    def testDepthJump(self):
         if not (self.jump_data and isinstance(self.jump_data["mass"], float) and self.jump_data["mass"]>0): raise ValueError("Invalid mass data")
+
+        # --------------------------------------------
+
+
+        def analysis_result_calculation(force, time, start_idx, ax, entries_params):
+            weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
+
+            dFdt = np.gradient(force, time)
+
+            start_amortization = np.argmax(force >= weight*(entries_params["start_threshold"]["info"]["value"]/100))
+            takeoff = start_amortization + np.argmax(force[start_amortization:] <= weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))
+            peak_amortization_force = start_amortization + np.argmax(force[start_amortization:takeoff])
+
+            start_push_off_threshold_max = peak_amortization_force + np.argmax(force[peak_amortization_force:takeoff] <= force[peak_amortization_force]*(entries_params["start_push_off_threshold_max"]["info"]["value"]/100))
+            start_push_off_threshold_min = peak_amortization_force + np.argmax(force[peak_amortization_force:takeoff] <= force[peak_amortization_force]*(entries_params["start_push_off_threshold_min"]["info"]["value"]/100))
+            start_push_off = start_push_off_threshold_max + np.abs(dFdt[start_push_off_threshold_max:start_push_off_threshold_min] - 0).argmin()
+
+            landing = takeoff + np.argmax(force[takeoff:] > weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))
+            peak_landing_force = landing + np.argmax(force[landing:])
+
+            # Save result
+
+            result = {
+                "start_amortization": start_idx + start_amortization,
+                "start_push_off": start_idx + start_push_off,
+                "peak_amortization_force": start_idx + peak_amortization_force,
+                "takeoff": start_idx + takeoff,
+                "landing": start_idx + landing,
+                "peak_landing_force": start_idx + peak_landing_force
+            }
+
+            # ==== 3. Plot ====
+
+            plotted_elements = []
+
+            events = {
+                "Start amortization": start_amortization,
+                "Start push-off": start_push_off,
+                "Peak amortization force": peak_amortization_force,
+                "Takeoff": takeoff,
+                "Landing": landing,
+                "Peak Landing Force": peak_landing_force
+            }
+            event_color = ['red', 'orange', 'blue', 'green', 'brown', 'purple']
+
+            for (name, idx), color in zip(events.items(), event_color):
+                plotted_elements.append(ax.scatter(time[idx], force[idx], marker='o', color=color))
+                plotted_elements.append(ax.text(time[idx], force[idx] + 30, name, color=color, fontsize=9, ha='center'))
+
+            # 2. Aree colorate per le fasi
+            plotted_elements.append(ax.axvspan(time[0], time[start_amortization], color='yellow', alpha=0.2, label='Waiting for jump'))
+            plotted_elements.append(ax.axvspan(time[start_amortization], time[start_push_off], color='orange', alpha=0.2, label='Amortization Phase'))
+            plotted_elements.append(ax.axvspan(time[start_push_off], time[takeoff], color='green', alpha=0.2, label='Push-off Phase'))
+            plotted_elements.append(ax.axvspan(time[takeoff], time[landing], color='blue', alpha=0.2, label='Flight Phase'))
+            plotted_elements.append(ax.axvspan(time[landing], time[-1], color='purple', alpha=0.2, label='Landing Phase'))
+
+            return result, plotted_elements
+        
+
+        def analysis_callback(start_idx, end_idx, results_analysis):
+            
+            force = np.sum(self.raw_data["lc"], axis=0)
+
+            time_contact = self.raw_data["time"][results_analysis["takeoff"]] - self.raw_data["time"][results_analysis["start_amortization"]]
+            time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
+
+            F_avg = np.mean(force[results_analysis["start_push_off"]:results_analysis["takeoff"]])
+            v0 = (F_avg * time_contact) / self.jump_data["mass"]
+            h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
+
+            
+            smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
+            smart_update_label(label_indicator_jump_height, f"Jump height: {round(h*100,2)} cm", "black")
+            smart_update_label(label_indicator_average_reaction_force, f"Average reaction force: {round(F_avg,2)} N", "black")
+            smart_update_label(label_indicator_jumping_speed, f"Jumping speed: {round(v0,2)} m/s", "black")
+            smart_update_label(label_indicator_flight_time, f"Flight time: {round(time_flight,5)} s", "black")
+            smart_update_label(label_indicator_time_contact, f"Contact time: {round(time_contact,5)} s", "black")
+
+            smart_update_label(label_indicator_start_amortization, f"Start amortization: {round(self.raw_data["time"][results_analysis["start_amortization"]],5)} s", "black")
+            smart_update_label(label_indicator_start_push_off, f"Start push-off: {round(self.raw_data["time"][results_analysis["start_push_off"]],5)} s", "black")
+            smart_update_label(label_indicator_peak_amortization_force, f"Peak amortization force at {round(self.raw_data["time"][results_analysis["peak_amortization_force"]],5)} s with value {round(force[results_analysis["peak_amortization_force"]],2)} N", "black")
+            smart_update_label(label_indicator_takeoff, f"Takeoff: {round(self.raw_data["time"][results_analysis["takeoff"]],5)} s", "black")
+            smart_update_label(label_indicator_landing, f"Landing: {round(self.raw_data["time"][results_analysis["landing"]],5)} s", "black")
+            smart_update_label(label_indicator_peak_landing_force, f"Peak landing force at {round(self.raw_data["time"][results_analysis["peak_landing_force"]],5)} s with value {round(force[results_analysis["peak_landing_force"]],2)} N", "black")
+
+
+
+        def func1():
+            pass
+
+
+        def func2():
+            if not (self.raw_data and self.raw_data["size"]>0): return 
+
+            for i, k in enumerate(info_load_cells):
+                lines[k].set_data(self.raw_data["time"], self.raw_data["lc"][i])
+                axes[k].relim()
+                axes[k].autoscale_view()
+            canvas.draw()
+
+            clear_frame(frame_control_test)
+
+            params = [
+                {"label":"Start Threshold (%)","type":float,"value":2,"key":"start_threshold","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0},
+                {"label":"Takeoff Threshold (%)","type":float,"value":5,"key":"takeoff_threshold","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0},
+                {"label":"Start Push-off Threshold Max (%)","type":float,"value":70,"key":"start_push_off_threshold_max","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0},
+                {"label":"Start Push-off Threshold Min (%)","type":float,"value":30,"key":"start_push_off_threshold_min","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0}
+            ]
+            analyze_btn = ttk.Button(frame_control_test, text="Analyze data", command=lambda: self.analysisJumpPhase(analysis_result_calculation, analysis_callback, params))
+            analyze_btn.pack(padx=20, pady=20)
+            automatic_scaling()  
+
 
         # --------------------------------------------
         label_frame_indicator_general_data = tk.LabelFrame(frame_indicator, text=f"General data", padx=10, pady=10)
         label_frame_indicator_general_data.pack(fill="both")
 
-        label_frame_indicator_jump_power = tk.LabelFrame(frame_indicator, text=f"Jump power", padx=10, pady=10)
-        label_frame_indicator_jump_power.pack(fill="both")
+        label_frame_indicator_jump_event = tk.LabelFrame(frame_indicator, text=f"Jump event", padx=10, pady=10)
+        label_frame_indicator_jump_event.pack(fill="both")
 
-        label_indicator_mass = tk.Label(label_frame_indicator_general_data, text=f"Mass: {self.jump_data['mass']} Kg", font=("Arial", 12))
+        label_indicator_mass = tk.Label(label_frame_indicator_general_data, text=f"Mass: {round(self.jump_data["mass"],2)} Kg", font=("Arial", 12))
         label_indicator_mass.pack(side=tk.LEFT, padx=20)
 
         label_indicator_jump_height = tk.Label(label_frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
         label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
 
-        label_indicator_jump_time_AVG = tk.Label(label_frame_indicator_general_data, text=f"Jump time: {0.0} s", font=("Arial", 12))
-        label_indicator_jump_time_AVG.pack(side=tk.LEFT, padx=20)
+        label_indicator_average_reaction_force = tk.Label(label_frame_indicator_general_data, text=f"Average reaction force: {0.0} N", font=("Arial", 12))
+        label_indicator_average_reaction_force.pack(side=tk.LEFT, padx=20)
 
-        label_indicator_first_touch = tk.Label(label_frame_indicator_general_data, text=f"First touch: {0.0} s", font=("Arial", 12))
-        label_indicator_first_touch.pack(side=tk.LEFT, padx=20)
+        label_indicator_jumping_speed = tk.Label(label_frame_indicator_general_data, text=f"Jumping speed: {0.0} m/s", font=("Arial", 12))
+        label_indicator_jumping_speed.pack(side=tk.LEFT, padx=20)
 
-        label_indicator_jump_power_AVG = tk.Label(label_frame_indicator_jump_power, text=f"Jump power AVG: {0.0} N", font=("Arial", 12))
-        label_indicator_jump_power_AVG.pack(side=tk.LEFT, padx=20)
+        label_indicator_flight_time = tk.Label(label_frame_indicator_general_data, text=f"Flight time: {0.0} s", font=("Arial", 12))
+        label_indicator_flight_time.pack(side=tk.LEFT, padx=20)
 
-        label_indicator_jump_power = {k: tk.Label(label_frame_indicator_jump_power, text=f"Jump power {k}: {0.0} N", font=("Arial", 12)) for k in info_load_cells}
-        for k in info_load_cells:
-            label_indicator_jump_power[k].pack(side=tk.LEFT, padx=20)
-    
+        label_indicator_time_contact = tk.Label(label_frame_indicator_general_data, text=f"Contact time: {0.0} s", font=("Arial", 12))
+        label_indicator_time_contact.pack(side=tk.LEFT, padx=20)
+
+
+        label_indicator_start_amortization = tk.Label(label_frame_indicator_jump_event, text=f"Start amortization: {0.0} s", font=("Arial", 12))
+        label_indicator_start_amortization.grid(row=0, column=0, sticky='w', pady=5, padx=10)
+
+        label_indicator_start_push_off = tk.Label(label_frame_indicator_jump_event, text=f"Start push-off: {0.0} s", font=("Arial", 12))
+        label_indicator_start_push_off.grid(row=0, column=1, sticky='w', pady=5, padx=10)
+
+        label_indicator_takeoff = tk.Label(label_frame_indicator_jump_event, text=f"Takeoff: {0.0} s", font=("Arial", 12))
+        label_indicator_takeoff.grid(row=0, column=2, sticky='w', pady=5, padx=10)
+
+        label_indicator_landing = tk.Label(label_frame_indicator_jump_event, text=f"Landing: {0.0} s", font=("Arial", 12))
+        label_indicator_landing.grid(row=0, column=3, sticky='w', pady=5, padx=10)
+
+        label_indicator_peak_amortization_force = tk.Label(label_frame_indicator_jump_event, text=f"Peak amortization force at {0.0} s with value {0.0} N", font=("Arial", 12))
+        label_indicator_peak_amortization_force.grid(row=1, column=0, sticky='w', pady=5, padx=10)
+
+        label_indicator_peak_landing_force = tk.Label(label_frame_indicator_jump_event, text=f"Peak landing force at {0.0} s with value {0.0} N", font=("Arial", 12))
+        label_indicator_peak_landing_force.grid(row=1, column=2, sticky='w', pady=5, padx=10)
+
+
+
         # --------------------------------------------
         n = len(info_load_cells)
         cols = 1 if n == 1 else 2
@@ -607,6 +809,8 @@ class DataRappresentor():
         axes = np.atleast_1d(axes).flatten()
         axes = {k: ax for ax, k in zip(axes, info_load_cells)}
 
+        for k in axes.keys(): axes[k].grid(True)
+
         # Creating empty lines
         lines = {k: axes[k].plot([], [])[0] for k in info_load_cells}
 
@@ -614,7 +818,7 @@ class DataRappresentor():
         for k in info_load_cells:
             axes[k].set_title(f"Load Cell {k}")
             axes[k].set_xlabel("Time (s)")
-            axes[k].set_ylabel("Newton (N)")
+            axes[k].set_ylabel("GRF (N)")
 
         # Tkinter Integration
         canvas = FigureCanvasTkAgg(fig, master=frame_chart)
@@ -626,39 +830,116 @@ class DataRappresentor():
         toolbar.pack(side=tk.TOP, fill=tk.X)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         # --------------------------------------------
+                 
+
+        return 50000, func1, (), func2, ()
+
+    
+    def testNormalJump(self):
+        if not (self.jump_data and isinstance(self.jump_data["mass"], float) and self.jump_data["mass"]>0): raise ValueError("Invalid mass data")
+
+        # --------------------------------------------
+
+        def analysis_result_calculation(force, time, start_idx, ax, entries_params):
+            weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
+
+            # Event 1: Start movement
+            start_movement = np.argmax(force <= weight*(entries_params["start_threshold"]["info"]["value"]/100))
+
+            # Event 3: Start deceleration = primo valore forza ~0 dopo start braking
+            start_deceleration = start_movement + np.argmax(force[start_movement:] >= weight)
+
+            # Event 2: Start braking = primo zero crossing dopo start movement
+            start_braking = start_movement + np.argmin(force[start_movement:start_deceleration])
+
+            # Event 5: Takeoff = primo punto dopo peak_takeoff_force con forza sotto soglia
+            takeoff = start_deceleration + np.argmax(force[start_deceleration:] <= weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))
+
+            # Event 4: Start concentric = primo zero crossing dopo deceleration
+            peak_takeoff_force = start_deceleration + np.argmax(force[start_deceleration:takeoff])
+
+            # Event 6: Landing = primo punto dopo takeoff con forza sopra soglia
+            landing = takeoff + np.argmax(force[takeoff:] > weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))
+
+            # Event 7: Peak landing force = massimo dopo il landing
+            peak_landing_force = landing + np.argmax(force[landing:])
+
+            # Save result
+
+            result = {
+                "start_movement": start_idx + start_movement,
+                "start_deceleration": start_idx + start_deceleration,
+                "start_braking": start_idx + start_braking,
+                "takeoff": start_idx + takeoff,
+                "peak_takeoff_force": start_idx + peak_takeoff_force,
+                "landing": start_idx + landing,
+                "peak_landing_force": start_idx + peak_landing_force
+            }
+
+            # ==== 3. Plot ====
+
+            plotted_elements = []
+
+            events = {
+                "Start Movement": start_movement,
+                "Start Braking": start_braking,
+                "Start Deceleration": start_deceleration,
+                "Peak Takeoff Force": peak_takeoff_force,
+                "Takeoff": takeoff,
+                "Landing": landing,
+                "Peak Landing Force": peak_landing_force
+            }
+            event_color = ['red', 'orange', 'blue', 'green', 'brown', 'purple', 'yellow']
+
+            for (name, idx), color in zip(events.items(), event_color):
+                plotted_elements.append(ax.scatter(time[idx], force[idx], marker='o', color=color))
+                plotted_elements.append(ax.text(time[idx], force[idx] + 30, name, color=color, fontsize=9, ha='center'))
+
+            # 2. Aree colorate per le fasi
+            plotted_elements.append(ax.axvspan(time[0], time[start_movement], color='yellow', alpha=0.2, label='Jump preparation'))
+            plotted_elements.append(ax.axvspan(time[start_movement], time[peak_takeoff_force], color='orange', alpha=0.2, label='Eccentric Phase'))
+            plotted_elements.append(ax.axvspan(time[peak_takeoff_force], time[takeoff], color='green', alpha=0.2, label='Concentric Phase'))
+            plotted_elements.append(ax.axvspan(time[takeoff], time[landing], color='blue', alpha=0.2, label='Flight Phase'))
+            plotted_elements.append(ax.axvspan(time[landing], time[-1], color='purple', alpha=0.2, label='Landing Phase'))
+
+            return result, plotted_elements
         
-        
-        def analyze_callback(interval, associated_interval):
-            start, end = interval
 
-            data = {}
+        def analysis_callback(start_idx, end_idx, results_analysis):
+
+            force = np.sum(self.raw_data["lc"], axis=0)
+
+            time_contact = self.raw_data["time"][results_analysis["takeoff"]] - self.raw_data["time"][results_analysis["start_movement"]]
+            time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
+
+            F_avg = np.mean(force[results_analysis["start_movement"]:results_analysis["takeoff"]])
+            v0 = (F_avg * time_contact) / self.jump_data["mass"]
+            h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
+
             
-            data["first_touch"]=self.raw_data["time"][end]
-            data["jump_time"]=data["first_touch"]-self.raw_data["time"][start]
-
-            data["jump_height"]=(1/2)*self.jump_data["acceleration_of_gravity"]*((data["jump_time"]/2)**2)
-
-            data["jump_power"] = {}
-            for i, k in enumerate(info_load_cells): 
-                jump_time = self.raw_data["time"][associated_interval[i][1]]-self.raw_data["time"][associated_interval[i][0]]
-                data["jump_power"][k] = (self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]*data["jump_height"])/(jump_time/2)
-            
-            data["jump_power_AVG"]=sum(data["jump_power"].values())/len(data["jump_power"])
-
-
             smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
-            smart_update_label(label_indicator_jump_height, f"Jump height: {round(data["jump_height"]*100,2)} cm", "black")
+            smart_update_label(label_indicator_jump_height, f"Jump height: {round(h*100,2)} cm", "black")
+            smart_update_label(label_indicator_average_reaction_force, f"Average reaction force: {round(F_avg,2)} N", "black")
+            smart_update_label(label_indicator_jumping_speed, f"Jumping speed: {round(v0,2)} m/s", "black")
+            smart_update_label(label_indicator_flight_time, f"Flight time: {round(time_flight,5)} s", "black")
+            smart_update_label(label_indicator_time_contact, f"Contact time: {round(time_contact,5)} s", "black")
 
-            smart_update_label(label_indicator_jump_time_AVG, f"Jump time: {round(data["jump_time"], 5)} s", "black")
+            smart_update_label(label_indicator_start_movement, f"Start movement: {round(self.raw_data["time"][results_analysis["start_movement"]],5)} s", "black")
+            smart_update_label(label_indicator_start_braking, f"Start braking at {round(self.raw_data["time"][results_analysis["start_braking"]],5)} s with value {round(force[results_analysis["start_braking"]],2)} N", "black")
+            smart_update_label(label_indicator_start_deceleration, f"Start deceleration: {round(self.raw_data["time"][results_analysis["start_deceleration"]],5)} s", "black")
+            smart_update_label(label_indicator_peak_takeoff_force, f"Peak takeoff force at {round(self.raw_data["time"][results_analysis["peak_takeoff_force"]],5)} s with value {round(force[results_analysis["peak_takeoff_force"]],2)} N", "black")
+            smart_update_label(label_indicator_takeoff, f"Takeoff: {round(self.raw_data["time"][results_analysis["takeoff"]],5)} s", "black")
+            smart_update_label(label_indicator_landing, f"Landing: {round(self.raw_data["time"][results_analysis["landing"]],5)} s", "black")
+            smart_update_label(label_indicator_peak_landing_force, f"Peak landing force at {round(self.raw_data["time"][results_analysis["peak_landing_force"]],5)} s with value {round(force[results_analysis["peak_landing_force"]],2)} N", "black")
 
-            smart_update_label(label_indicator_first_touch, f"First touch: {round(data["first_touch"], 5)} s", "black")
-
-            for k in info_load_cells: smart_update_label(label_indicator_jump_power[k], f"Jump power {k}: {round(data["jump_power"][k], 3)} N", "black")
-            smart_update_label(label_indicator_jump_power_AVG, f"Jump power AVG: {round(data["jump_power_AVG"], 3)} N", "black")
-
-
-
+        
         def func1():
+            pass
+
+
+        def func2():
+            if not (self.raw_data and self.raw_data["size"]>0): return 
+
             for i, k in enumerate(info_load_cells):
                 lines[k].set_data(self.raw_data["time"], self.raw_data["lc"][i])
                 axes[k].relim()
@@ -666,36 +947,86 @@ class DataRappresentor():
             canvas.draw()
 
 
-        def func2():
-            if not (self.raw_data and self.raw_data["size"]>0): return 
             clear_frame(frame_control_test)
-            analyze_btn = ttk.Button(frame_control_test, text="Analyze data", command=lambda: self.launchAnalysis(self.raw_data["time"], self.raw_data["lc"], info_load_cells, 0, 13, analyze_callback))
+            params = [
+                {"label":"Start Threshold (%)","type":float,"value":95,"key":"start_threshold","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0},
+                {"label":"Takeoff Threshold (%)","type":float,"value":5,"key":"takeoff_threshold","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0}
+            ]
+            analyze_btn = ttk.Button(frame_control_test, text="Analyze data", command=lambda: self.analysisJumpPhase(analysis_result_calculation, analysis_callback, params))
             analyze_btn.pack(padx=20, pady=20)
-            automatic_scaling()           
+            automatic_scaling()  
 
-        return 50000, func1, (), func2, ()
-    
-
-    def testCalculateMass(self):
-        self.jump_data["mass"] = 0.0
 
         # --------------------------------------------
-        label_indicator_number_samples = tk.Label(frame_indicator, text=f"Number of samples collected: {0}", font=("Arial", 12))
-        label_indicator_number_samples.grid(row=0, column=0)
-        label_indicator_mass = tk.Label(frame_indicator, text=f"Mass: {self.jump_data['mass']} Kg", font=("Arial", 12))
-        label_indicator_mass.grid(row=1, column=0, pady=10)
+        label_frame_indicator_general_data = tk.LabelFrame(frame_indicator, text=f"General data", padx=10, pady=10)
+        label_frame_indicator_general_data.pack(fill="both")
+
+        label_frame_indicator_jump_event = tk.LabelFrame(frame_indicator, text=f"Jump event", padx=10, pady=10)
+        label_frame_indicator_jump_event.pack(fill="both")
+
+        label_indicator_mass = tk.Label(label_frame_indicator_general_data, text=f"Mass: {round(self.jump_data["mass"],2)} Kg", font=("Arial", 12))
+        label_indicator_mass.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jump_height = tk.Label(label_frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
+        label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_average_reaction_force = tk.Label(label_frame_indicator_general_data, text=f"Average reaction force: {0.0} N", font=("Arial", 12))
+        label_indicator_average_reaction_force.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_jumping_speed = tk.Label(label_frame_indicator_general_data, text=f"Jumping speed: {0.0} m/s", font=("Arial", 12))
+        label_indicator_jumping_speed.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_flight_time = tk.Label(label_frame_indicator_general_data, text=f"Flight time: {0.0} s", font=("Arial", 12))
+        label_indicator_flight_time.pack(side=tk.LEFT, padx=20)
+
+        label_indicator_time_contact = tk.Label(label_frame_indicator_general_data, text=f"Contact time: {0.0} s", font=("Arial", 12))
+        label_indicator_time_contact.pack(side=tk.LEFT, padx=20)
+
+
+        label_indicator_start_movement = tk.Label(label_frame_indicator_jump_event, text=f"Start movement: {0.0} s", font=("Arial", 12))
+        label_indicator_start_movement.grid(row=0, column=0, sticky='w', pady=5, padx=10)
+
+        label_indicator_start_deceleration = tk.Label(label_frame_indicator_jump_event, text=f"Start deceleration: {0.0} s", font=("Arial", 12))
+        label_indicator_start_deceleration.grid(row=0, column=1, sticky='w', pady=5, padx=10)
+
+        label_indicator_takeoff = tk.Label(label_frame_indicator_jump_event, text=f"Takeoff: {0.0} s", font=("Arial", 12))
+        label_indicator_takeoff.grid(row=0, column=2, sticky='w', pady=5, padx=10)
+
+        label_indicator_landing = tk.Label(label_frame_indicator_jump_event, text=f"Landing: {0.0} s", font=("Arial", 12))
+        label_indicator_landing.grid(row=0, column=3, sticky='w', pady=5, padx=10)
+
+        label_indicator_peak_takeoff_force = tk.Label(label_frame_indicator_jump_event, text=f"Peak takeoff force at {0.0} s with value {0.0} N", font=("Arial", 12))
+        label_indicator_peak_takeoff_force.grid(row=1, column=0, sticky='w', pady=5, padx=10)
+
+        label_indicator_start_braking = tk.Label(label_frame_indicator_jump_event, text=f"Start braking at {0.0} s with value {0.0} N", font=("Arial", 12))
+        label_indicator_start_braking.grid(row=1, column=1, sticky='w', pady=5, padx=10)
+
+        label_indicator_peak_landing_force = tk.Label(label_frame_indicator_jump_event, text=f"Peak landing force at {0.0} s with value {0.0} N", font=("Arial", 12))
+        label_indicator_peak_landing_force.grid(row=1, column=2, sticky='w', pady=5, padx=10)
+
+
+
         # --------------------------------------------
-        fig, axis = plt.subplots(1, 1, figsize=(5, 2))
+        n = len(info_load_cells)
+        cols = 1 if n == 1 else 2
+        rows = math.ceil(n / cols)
+        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 2.5 * rows))
         fig.tight_layout()  # Improve the layout
         fig.subplots_adjust(hspace=0.50)  # Increase vertical space between charts
 
+        axes = np.atleast_1d(axes).flatten()
+        axes = {k: ax for ax, k in zip(axes, info_load_cells)}
+
+        for k in axes.keys(): axes[k].grid(True)
+
         # Creating empty lines
-        line = axis.plot([], [])[0]
+        lines = {k: axes[k].plot([], [])[0] for k in info_load_cells}
 
         # Axis configuration
-        axis.set_title(f"Mass chart")
-        axis.set_xlabel("Time (s)")
-        axis.set_ylabel("Newton (N)")
+        for k in info_load_cells:
+            axes[k].set_title(f"Load Cell {k}")
+            axes[k].set_xlabel("Time (s)")
+            axes[k].set_ylabel("GRF (N)")
 
         # Tkinter Integration
         canvas = FigureCanvasTkAgg(fig, master=frame_chart)
@@ -707,6 +1038,12 @@ class DataRappresentor():
         toolbar.pack(side=tk.TOP, fill=tk.X)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         # --------------------------------------------
+                 
+
+        return 50000, func1, (), func2, ()
+    
+
+    def testCalculateMass(self):
 
         def func1():
             smart_update_label(label_indicator_number_samples, f"Number of samples collected: {self.raw_data["size"]}", "black")
@@ -723,6 +1060,39 @@ class DataRappresentor():
             self.jump_data["mass"] = np.mean(np.sum(self.raw_data["lc"], axis=0))/self.jump_data["acceleration_of_gravity"]
             smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
 
+        # --------------------------------------------
+
+        self.jump_data["mass"] = 0.0
+
+        # --------------------------------------------
+        label_indicator_number_samples = tk.Label(frame_indicator, text=f"Number of samples collected: {0}", font=("Arial", 12))
+        label_indicator_number_samples.grid(row=0, column=0)
+        label_indicator_mass = tk.Label(frame_indicator, text=f"Mass: {self.jump_data['mass']} Kg", font=("Arial", 12))
+        label_indicator_mass.grid(row=1, column=0, pady=10)
+        # --------------------------------------------
+        fig, axis = plt.subplots(1, 1, figsize=(5, 2))
+        fig.tight_layout()  # Improve the layout
+        fig.subplots_adjust(hspace=0.50)  # Increase vertical space between charts
+        axis.grid(True)
+
+        # Creating empty lines
+        line = axis.plot([], [])[0]
+
+        # Axis configuration
+        axis.set_title(f"Mass chart")
+        axis.set_xlabel("Time (s)")
+        axis.set_ylabel("GRF (N)")
+
+        # Tkinter Integration
+        canvas = FigureCanvasTkAgg(fig, master=frame_chart)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas.draw()
+
+        # Adding the toolbar above the chart
+        toolbar = NavigationToolbar2Tk(canvas, frame_chart)
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        # --------------------------------------------
      
         return 50000, func1, (), func2, ()
 
@@ -789,7 +1159,6 @@ class DataAcquirer(threading.Thread):
         self.acquisition=False
         self.acquiring=threading.Lock()
 
-        self.time_sleep_acquiring=0.0
         self.time_sleep_not_acquiring=0.3
 
         self._stopAcquisition()
@@ -804,8 +1173,7 @@ class DataAcquirer(threading.Thread):
                         data_dq.append(None)
                         self._stopAcquisition()
 
-            if self.acquisition: time.sleep(self.time_sleep_acquiring)
-            else: time.sleep(self.time_sleep_not_acquiring)
+            if not self.acquisition: time.sleep(self.time_sleep_not_acquiring)
 
 
     def _startAcquisition(self):
@@ -987,6 +1355,55 @@ def get_info_load_cells():
 
 # ----------------------
 
+
+
+
+
+
+
+fs = 700  # campioni al secondo
+t_tot = 10  # durata totale in secondi
+time1 = np.linspace(0, t_tot, int(t_tot * fs))
+massa = 70  # kg
+g = 9.81
+peso = massa * g  # peso in N
+
+# ==== 2. Costruzione segnale ====
+F = np.ones_like(time1) * peso
+
+# Parametri della simulazione
+t_inizio_eccentrica = 0.75
+t_minimo = 0.9
+t_pico_spinta = 1.05
+t_decollo = 1.12
+t_atterraggio = 1.42
+
+# Fase eccentrica
+idx_ecc = (time1 >= t_inizio_eccentrica) & (time1 < t_minimo)
+F[idx_ecc] -= 300 * np.sin(np.pi * (time1[idx_ecc] - t_inizio_eccentrica) / (t_minimo - t_inizio_eccentrica))
+
+# Fase concentrica
+idx_conc = (time1 >= t_minimo) & (time1 < t_decollo)
+F[idx_conc] += 1200 * np.sin(np.pi * (time1[idx_conc] - t_minimo) / (t_decollo - t_minimo))
+
+# Fase di volo
+idx_volo = (time1 >= t_decollo) & (time1 < t_atterraggio)
+F[idx_volo] = 0
+
+# Dopo l’atterraggio (picco)
+idx_post = (time1 >= t_atterraggio) & (time1 < t_atterraggio + 0.1)
+F[idx_post] += 1800 * np.sin(np.pi * (time1[idx_post] - t_atterraggio) / 0.1)
+
+# Aggiunta rumore + celle
+noise = np.random.normal(0, 10, size=time1.shape)
+F_noisy = F + noise
+celle = np.stack([F_noisy / 4 + np.random.normal(0, 2, size=time1.shape) for _ in range(4)], axis=0)
+
+
+volte = -1
+tempo_estr = 0
+
+
 stringa_scritta = ""
 class ArduinoEmulate(USBIODevice):
     def __init__(self, info_device={}, device_timeout=5):
@@ -1006,12 +1423,21 @@ class ArduinoEmulate(USBIODevice):
 
     
     def _read(self):
+        global volte, tempo_estr
         #time.sleep(1)
         #print("read: "+stringa_scritta)
         import random
         if "get_data" in stringa_scritta:
-            return {"code":"OK", "response":{"lc":{"values":{"LX":random.randint(1, 10), "RX":random.randint(1, 10), "UP":random.randint(1, 10), "DW":random.randint(1, 10)}, "time": time.time()}}}
+            
+            if volte%2==1:
+                tempo_estr+=1
+                return {"code":"OK", "response":{"lc":{"values":{"LX":celle[0][tempo_estr], "RX":celle[1][tempo_estr], "UP":celle[2][tempo_estr], "DW":celle[3][tempo_estr]}, "time": time.time()}}}
+            else:
+                return {"code":"OK", "response":{"lc":{"values":{"LX":peso/4 + random.random(), "RX":peso/4 + random.random(), "UP":peso/4 + random.random(), "DW":peso/4 + random.random()}, "time": time.time()}}}
+
         elif "scale_tare" in stringa_scritta:
+            volte += 1
+            tempo_estr = 0
             return {"code":"OK", "response":{"lc":{"LX":"OK", "RX":"OK", "UP":"OK", "DW":"OK"}}}
         elif "is_alive" in stringa_scritta:
             return {"code":"OK"}
@@ -1022,6 +1448,9 @@ class ArduinoEmulate(USBIODevice):
         global stringa_scritta
         stringa_scritta = f"?{json.dumps(data)}!"
         #print("write: "+stringa_scritta)
+
+
+
 
 
 
@@ -1076,6 +1505,8 @@ frame_acquisition.pack(pady=10)
 
 button_test_normal_jump = tk.Button(frame_acquisition, text="Normal jump", command=lambda: command_button_test(data_rappresentor.testNormalJump))
 button_test_normal_jump.pack(side=tk.LEFT, padx=20)
+button_test_depth_jump = tk.Button(frame_acquisition, text="Depth jump", command=lambda: command_button_test(data_rappresentor.testDepthJump))
+button_test_depth_jump.pack(side=tk.LEFT, padx=20)
 button_test_calculate_mass = tk.Button(frame_acquisition, text="Calculate mass", command=lambda: command_button_test(data_rappresentor.testCalculateMass))
 button_test_calculate_mass.pack(side=tk.LEFT, padx=20)
 button_stop_test = tk.Button(frame_acquisition, text="Stop test", command=command_button_stop_test)
