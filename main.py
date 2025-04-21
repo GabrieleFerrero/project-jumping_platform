@@ -16,6 +16,7 @@ from functools import partial
 from scipy.signal import savgol_filter
 from matplotlib.patches import Rectangle
 import math
+from datetime import datetime
 
 
 
@@ -187,8 +188,7 @@ class Arduino(USBIODevice):
         if self.device_connection.is_open:
             self._write({"command":"is_alive"})
             message_arduino_read = self._read()
-            if message_arduino_read is not None:
-                if message_arduino_read["code"]=="OK": return True
+            if message_arduino_read is not None: return True
         return False
     
     def _close_connection(self):
@@ -231,8 +231,8 @@ class Arduino(USBIODevice):
 
         if response: 
             result = json.loads(response)
-            if not (result["code"] == "OK"): raise ArduinoCommunicationException("Bad json")
-            return result["response"]
+            if "code" in result and result["code"] == "ERROR": raise ArduinoCommunicationException("Bad json")
+            return result
         else: return json.loads("{}")
     
     def _write(self, data):
@@ -271,7 +271,7 @@ class DataRappresentor():
         self.stop_representation=False # force stop representation
         self.request_stop_representation=False 
     
-        self.time_sleep=2 # ms (milliseconds)
+        self.function_recall_time=2 # ms (milliseconds)
         
         self.initializationRawData(0)
         self.stopRepresentation()
@@ -313,7 +313,7 @@ class DataRappresentor():
                 func2(*args2)
 
             func = partial(self.run, func1, args1, func2, args2)
-            self.after_id = root.after(self.time_sleep, func)
+            self.after_id = root.after(self.function_recall_time, func)
 
 
     def analysisError(self):
@@ -706,7 +706,7 @@ class DataRappresentor():
             time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
 
             F_avg = np.mean(force[results_analysis["start_push_off"]:results_analysis["takeoff"]])
-            v0 = (F_avg * time_contact) / self.jump_data["mass"]
+            v0 = math.sqrt((2* F_avg * time_contact) / self.jump_data["mass"])
             h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
 
             
@@ -913,7 +913,7 @@ class DataRappresentor():
             time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
 
             F_avg = np.mean(force[results_analysis["start_movement"]:results_analysis["takeoff"]])
-            v0 = (F_avg * time_contact) / self.jump_data["mass"]
+            v0 = math.sqrt((2* F_avg * time_contact) / self.jump_data["mass"])
             h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
 
             
@@ -1115,7 +1115,7 @@ class DataRappresentor():
             self.stop_representation=False
             self.request_stop_representation=False
             func = partial(self.run, func1, args1, func2, args2)
-            self.after_id = root.after(self.time_sleep, func)
+            self.after_id = root.after(self.function_recall_time, func)
         except ValueError as e: 
             self.analysisError()
             show_warning("Attention!", e)
@@ -1135,12 +1135,11 @@ class DataRappresentor():
     
     def addData(self, data):
         if self.raw_data and data:
-            data_lc = data["response"]["lc"]
-            if None not in list(data_lc["values"].values()):
+            if None not in list(data["values"].values()):
                 if self.raw_data["size"]<self.raw_data["max_size"]:
-                    if self.raw_data["size"]==0:  self.raw_data["initial_time"] = data_lc["time"]
-                    self.raw_data["unsliced_time"][self.raw_data["size"]] = data_lc["time"]-self.raw_data["initial_time"]
-                    for i, k in enumerate(info_load_cells): self.raw_data["unsliced_lc"][i, self.raw_data["size"]] = data_lc["values"][k]
+                    if self.raw_data["size"]==0:  self.raw_data["initial_time"] = data["time"]
+                    self.raw_data["unsliced_time"][self.raw_data["size"]] = data["time"]-self.raw_data["initial_time"]
+                    for i, k in enumerate(info_load_cells): self.raw_data["unsliced_lc"][i, self.raw_data["size"]] = data["values"][k]
                     self.raw_data["size"] += 1
                 else:
                     show_warning("Attention!", "You have reached the maximum number of saveable champions.")
@@ -1159,6 +1158,7 @@ class DataAcquirer(threading.Thread):
         self.acquisition=False
         self.acquiring=threading.Lock()
 
+        self.time_sleep_acquiring = 0.0005
         self.time_sleep_not_acquiring=0.3
 
         self._stopAcquisition()
@@ -1167,17 +1167,22 @@ class DataAcquirer(threading.Thread):
         while self.acquisition_activity:
             with self.acquiring:
                 if self.acquisition:
-                    try: data_dq.append(arduino.write_and_read({"command":"get_data"}))
+                    try: data_dq.append(arduino.read())
                     except Exception as e: 
                         #print(e)
                         data_dq.append(None)
                         self._stopAcquisition()
+                    
 
-            if not self.acquisition: time.sleep(self.time_sleep_not_acquiring)
+            if self.acquisition: time.sleep(self.time_sleep_acquiring)
+            else: time.sleep(self.time_sleep_not_acquiring)
 
 
     def _startAcquisition(self):
         self.acquisition=True
+        try: 
+            if arduino is not None: arduino.write_and_read({"command":"start_reading"})
+        except: pass
 
     def startAcquisition(self):
         with self.acquiring:
@@ -1185,6 +1190,9 @@ class DataAcquirer(threading.Thread):
 
     def _stopAcquisition(self):
         self.acquisition=False
+        try: 
+            if arduino is not None: arduino.write_and_read({"command":"stop_reading"})
+        except: pass
 
     def stopAcquisition(self):
         with self.acquiring: 
@@ -1225,15 +1233,14 @@ def get_connected_USB_devices():
         #print("No valid USB device found.")
         pass
 
-    list_info_device = [{"port": "prova"}]
-    #list_info_device = list_device
+    list_info_device = list_device
 
 def open_device_connection(info_device, timeout):
     global arduino
     close_device_connection()
     smart_update_label(label_status_connection, "Connecting...", "orange")
     try: 
-        arduino = ArduinoEmulate(info_device, timeout) 
+        arduino = Arduino(info_device, timeout) 
         arduino.open_connection()
         if check_device_connection():
             get_info_load_cells()
@@ -1305,7 +1312,7 @@ def command_button_scale_tare():
 
     if check_device_connection():
         try:
-            result = arduino.write_and_read({"command":"scale_tare"})["response"]["lc"]
+            result = arduino.write_and_read({"command":"scale_tare"})["lc"]
             result_string = ""
             for i, k in enumerate(info_load_cells):
                 result_string += f"{k}: {result[k]}"
@@ -1352,112 +1359,7 @@ def get_info_load_cells():
 
 
 
-
-# ----------------------
-
-
-
-
-
-
-
-fs = 700  # campioni al secondo
-t_tot = 10  # durata totale in secondi
-time1 = np.linspace(0, t_tot, int(t_tot * fs))
-massa = 70  # kg
-g = 9.81
-peso = massa * g  # peso in N
-
-# ==== 2. Costruzione segnale ====
-F = np.ones_like(time1) * peso
-
-# Parametri della simulazione
-t_inizio_eccentrica = 0.75
-t_minimo = 0.9
-t_pico_spinta = 1.05
-t_decollo = 1.12
-t_atterraggio = 1.42
-
-# Fase eccentrica
-idx_ecc = (time1 >= t_inizio_eccentrica) & (time1 < t_minimo)
-F[idx_ecc] -= 300 * np.sin(np.pi * (time1[idx_ecc] - t_inizio_eccentrica) / (t_minimo - t_inizio_eccentrica))
-
-# Fase concentrica
-idx_conc = (time1 >= t_minimo) & (time1 < t_decollo)
-F[idx_conc] += 1200 * np.sin(np.pi * (time1[idx_conc] - t_minimo) / (t_decollo - t_minimo))
-
-# Fase di volo
-idx_volo = (time1 >= t_decollo) & (time1 < t_atterraggio)
-F[idx_volo] = 0
-
-# Dopo l’atterraggio (picco)
-idx_post = (time1 >= t_atterraggio) & (time1 < t_atterraggio + 0.1)
-F[idx_post] += 1800 * np.sin(np.pi * (time1[idx_post] - t_atterraggio) / 0.1)
-
-# Aggiunta rumore + celle
-noise = np.random.normal(0, 10, size=time1.shape)
-F_noisy = F + noise
-celle = np.stack([F_noisy / 4 + np.random.normal(0, 2, size=time1.shape) for _ in range(4)], axis=0)
-
-
-volte = -1
-tempo_estr = 0
-
-
-stringa_scritta = ""
-class ArduinoEmulate(USBIODevice):
-    def __init__(self, info_device={}, device_timeout=5):
-        super().__init__(info_device, device_timeout)
-    
-    def _reset_buffer(self):
-        pass
-
-    def _check_connection(self):
-        return True
-    
-    def _close_connection(self):
-        pass
-    
-    def _open_connection(self):
-        return None
-
-    
-    def _read(self):
-        global volte, tempo_estr
-        #time.sleep(1)
-        #print("read: "+stringa_scritta)
-        import random
-        if "get_data" in stringa_scritta:
-            
-            if volte%2==1:
-                tempo_estr+=1
-                return {"code":"OK", "response":{"lc":{"values":{"LX":celle[0][tempo_estr], "RX":celle[1][tempo_estr], "UP":celle[2][tempo_estr], "DW":celle[3][tempo_estr]}, "time": time.time()}}}
-            else:
-                return {"code":"OK", "response":{"lc":{"values":{"LX":peso/4 + random.random(), "RX":peso/4 + random.random(), "UP":peso/4 + random.random(), "DW":peso/4 + random.random()}, "time": time.time()}}}
-
-        elif "scale_tare" in stringa_scritta:
-            volte += 1
-            tempo_estr = 0
-            return {"code":"OK", "response":{"lc":{"LX":"OK", "RX":"OK", "UP":"OK", "DW":"OK"}}}
-        elif "is_alive" in stringa_scritta:
-            return {"code":"OK"}
-        elif "get_info" in stringa_scritta:
-            return {"code":"OK", "lc": ["LX", "RX", "UP", "DW"]}
-    
-    def _write(self, data):
-        global stringa_scritta
-        stringa_scritta = f"?{json.dumps(data)}!"
-        #print("write: "+stringa_scritta)
-
-
-
-
-
-
-
-
-
-# ------------------------------------
+# -------------------------------------
 
 info_load_cells = []
 list_info_device = []
@@ -1538,3 +1440,5 @@ data_acquirer.start()
 automatic_scaling()
 # Starting root mainloop
 root.mainloop()
+
+
