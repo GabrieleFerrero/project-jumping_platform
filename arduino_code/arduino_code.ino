@@ -19,6 +19,7 @@ DeserializationError error;
 enum LCLabels {LC1, LC2, LC3, LC4, NUMBER_LC_LABELS};
 String serialInput = "";
 bool readingStatus = false;
+bool sendJson = true;
 ADS1256 loadCellsADC(DRDY_PIN, RESET_PIN, SYNC_PIN, CS_PIN, VREF); // DRDY, RESET, SYNC(PDWN), CS, VREF
 double loadCellsTare[] = {0.0,0.0,0.0,0.0};
 double loadCellsCalibrationFactor[] = {0.0046771144,0.0046056742,0.0046736458,0.0046137667};
@@ -46,7 +47,7 @@ int drateValues[16] ={
 // --------------------- //
 
 // PROTOTYPES FUNCTIONAL //
-void set_mux_channel(char inputMode, int inputChannel);
+
 // --------------------- //
 
 void setup() {
@@ -57,8 +58,8 @@ void setup() {
   loadCellsADC.sendDirectCommand(SELFCAL);
   delay(100);
   // --------------------- //
-
-  Serial.begin(460800);
+  
+  Serial.begin(921600); // 460800
   while (!Serial) {
     ; // wait for serial port to connect. Needed for native USB
   } 
@@ -84,92 +85,99 @@ void loop() {
       }
       case '!':
       {
-        //Serial.print("Start: ");
-        //Serial.println(millis());
-
-        //Serial.println(serial_input);  
+        sendJson = true;
 
         StaticJsonDocument<500> docOut;
-
 
         error = deserializeJson(docIn, serialInput);
         if (error) {
           docOut["code"] = "ERROR"; 
+          docOut["serialInput"] = serialInput;
         }else{
-          //Serial.println(serial_input);          
+          //Serial.println(serial_input);  
 
-          if(docIn["command"]=="set_state_digital_pin"){
-            int pin = docIn["pin"];
-            int value = docIn["value"];
-            digitalWrite(pin, value);
-          }else if(docIn["command"]=="set_state_analog_pin"){
-            int pin = docIn["pin"];
-            int value = docIn["value"];
-            analogWrite(pin, value);
-          }else if(docIn["command"]=="get_state_digital_pin"){
-            int pin = docIn["pin"];
-            int value = digitalRead(pin);
-            docOut["value"] = value;
-          }else if(docIn["command"]=="get_state_analog_pin"){
-            int pin = docIn["pin"];
-            int value = analogRead(pin);
-            docOut["value"] = value;
-          }else if(docIn["command"]=="get_info"){
-            JsonArray lc = docOut.createNestedArray("lc");
-
-            for (int i = 0; i < NUMBER_LC_LABELS; i++) {
-              lc.add(NAME_LC_LABELS[i]);
-            }
-
-          }else if(docIn["command"]=="start_reading"){
-            readingStatus=true;
-
-          }else if(docIn["command"]=="scale_tare"){
-            JsonObject lc = docOut.createNestedObject("lc");
-
-            loadCellsADC.stopConversion();
-
-            loadCellsADC.sendDirectCommand(SELFCAL);
-            delay(100);
-
-            double loadCellsRawData[] = {0.0,0.0,0.0,0.0};
-
-            for(int i=0; i<numberOfSamplesForScaleTare; i++){
-              for (int j=0; j<NUMBER_LC_LABELS; j++) {
-                loadCellsRawData[j] += loadCellsADC.cycleDifferential()/numberOfSamplesForScaleTare;
-              }
-            }
-
-            for(int i=0; i<NUMBER_LC_LABELS; i++){
-              if (isnan(loadCellsRawData[i])){
-                lc[NAME_LC_LABELS[i]] = "ERROR";
-              }else{
-                loadCellsTare[i] = loadCellsRawData[i];
-                lc[NAME_LC_LABELS[i]] = "OK";
-              }              
-            }
-
-            loadCellsADC.stopConversion();
-            
-            
-          }else if(docIn["command"]=="is_alive"){
-
-          }else if(docIn["command"]=="stop_reading"){
-            loadCellsADC.stopConversion();
-            readingStatus=false;
+          if (!docIn.containsKey("command") || docIn["command"].isNull()) {
+            docOut["code"] = "ERROR";
+            docOut["message"] = serialInput;
           }else{
-            docOut["code"] = "ERROR"; 
+          
+            docOut["command"] = docIn["command"];
+
+            if(docIn["command"]=="set_state_digital_pin"){
+              int pin = docIn["pin"];
+              int value = docIn["value"];
+              digitalWrite(pin, value);
+            }else if(docIn["command"]=="set_state_analog_pin"){
+              int pin = docIn["pin"];
+              int value = docIn["value"];
+              analogWrite(pin, value);
+            }else if(docIn["command"]=="get_state_digital_pin"){
+              int pin = docIn["pin"];
+              int value = digitalRead(pin);
+              docOut["value"] = value;
+            }else if(docIn["command"]=="get_state_analog_pin"){
+              int pin = docIn["pin"];
+              int value = analogRead(pin);
+              docOut["value"] = value;
+            }else if(docIn["command"]=="get_info"){
+              JsonArray lc = docOut.createNestedArray("lc");
+
+              for (int i = 0; i < NUMBER_LC_LABELS; i++) {
+                lc.add(NAME_LC_LABELS[i]);
+              }
+
+            }else if(docIn["command"]=="start_reading"){
+              readingStatus=true;
+              sendJson = false;
+
+            }else if(docIn["command"]=="scale_tare"){
+              JsonObject lc = docOut.createNestedObject("lc");
+
+              loadCellsADC.stopConversion();
+
+              loadCellsADC.sendDirectCommand(SELFCAL);
+              delay(100);
+
+              double loadCellsRawData[] = {0.0,0.0,0.0,0.0};
+
+              for(int i=0; i<numberOfSamplesForScaleTare; i++){
+                for (int j=0; j<NUMBER_LC_LABELS; j++) {
+                  loadCellsRawData[j] += loadCellsADC.cycleDifferential()/numberOfSamplesForScaleTare;
+                }
+              }
+
+              for(int i=0; i<NUMBER_LC_LABELS; i++){
+                if (isnan(loadCellsRawData[i])){
+                  lc[NAME_LC_LABELS[i]] = "ERROR";
+                }else{
+                  loadCellsTare[i] = loadCellsRawData[i];
+                  lc[NAME_LC_LABELS[i]] = "OK";
+                }              
+              }
+
+              loadCellsADC.stopConversion();
+              
+              
+            }else if(docIn["command"]=="is_alive"){
+
+            }else if(docIn["command"]=="stop_reading"){
+              loadCellsADC.stopConversion();
+              readingStatus=false;
+            }else{
+              docOut["code"] = "ERROR"; 
+            }
+
           }
         }
 
         serialInput = "";
 
-        Serial.print("?");
-        serializeJson(docOut, Serial);
-        Serial.println("!");
+        if(sendJson){
+          Serial.print("?");
+          serializeJson(docOut, Serial);
+          Serial.println("!");
+        }
 
-        //Serial.print("End: ");
-        //Serial.println(millis());
 
         break;
       }
@@ -181,11 +189,18 @@ void loop() {
     }
   }
 
+  // ---------------------- FUNCTIONS TO RECALL -------------------------
+
   if(readingStatus){
 
-    Serial.print("?{\"value\":[");
+    Serial.print("{\"values\":{");
     for(int i = 0; i < NUMBER_LC_LABELS; i++){
+      Serial.print("\"");
+      Serial.print(NAME_LC_LABELS[i]);
+      Serial.print("\":");
+
       double value = (((double)loadCellsADC.cycleDifferential())-loadCellsTare[i])*loadCellsCalibrationFactor[i];
+      
       if(isnan(value)){
         Serial.print("null");
       }else{
@@ -194,28 +209,12 @@ void loop() {
      
       if (i < NUMBER_LC_LABELS-1) Serial.print(",");
     }
-    Serial.print("],\"time\":");
-    Serial.print(((double)millis())/1000.0, 3);
+    Serial.print("},\"time\":");
+    Serial.print(((double)micros())/1000000.0, 6);
     Serial.print("}!");
     
   }
 
 
 
-}
-
-
-
-void set_mux_channel(char inputMode, int inputChannel){
-  switch(inputMode){
-    case 's':
-      loadCellsADC.setMUX(singleEndedChannels[inputChannel]);
-      break;
-    case 'd':
-      loadCellsADC.setMUX(differentialChannels[inputChannel]);
-      break;
-    default:
-      break;
-  }
-  delay(50);
 }

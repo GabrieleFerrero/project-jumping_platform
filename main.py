@@ -1,3 +1,4 @@
+from enum import Enum, auto
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
@@ -11,12 +12,10 @@ import threading
 import time
 import queue
 import numpy as np
-from collections import deque
 from functools import partial
 from scipy.signal import savgol_filter
 from matplotlib.patches import Rectangle
 import math
-from datetime import datetime
 
 
 
@@ -28,28 +27,29 @@ class ArduinoCommunicationException(Exception):
     """Custom exception for Arduino communication"""
     pass
 
+class ResourceBusyException(Exception):
+    pass
 
-class Code():
-    
-    code_list = ["ERROR", "OK", "INFO", "NULL"]
+class StateCommunicationDevice(Enum):
+    AVAILABLE_CONNECTED = auto()
+    AVAILABLE_NOT_CONNECTED = auto()
+    NOT_AVAILABLE = auto()
 
-    def __init__(self, code):
+class StateMultipleReadings(Enum):
+    START = auto()
+    STOP = auto()
+    CLOSE = auto()
+    NEXT = auto()
 
-        if code in Code.code_list:
-            self.code=code
-        else:
-            raise Exception("Non-existent code!")
-        
-    def __eq__(self, other):
-        if isinstance(other, Code):
-            return self.code==other.code
-        else: raise TypeError("The object passed is not of the expected type.")
+class StateDataAcquirer(Enum):
+    START = auto()
+    STOP = auto()
+    CLOSE = auto()
+    GET = auto()
+    GET_LAST = auto()
+    WAIT = auto()
+    FINISH = auto()
 
-    def __str__(self):
-        return str(self.code)
-
-
-    
 
 class IODevice(ABC):
     def __init__(self, info_device={}, device_timeout=5):
@@ -129,42 +129,77 @@ class IODevice(ABC):
     def _reset_buffer(self):
         pass
 
+    @abstractmethod
+    def _write_and_read(self, data):
+        pass
+
     def set_info_device(self, info_device):
         self.info_device=info_device    
 
-    def reset_buffer(self):
-        with self.lock_IO:
-            self.function_execution_with_timeout(self.device_timeout, self._reset_buffer)
+    def reset_buffer(self, timeout=None):
+        self.function_execution_with_timeout(self.device_timeout if timeout is None else timeout, self._reset_buffer)
 
-    def check_connection(self):
-        with self.lock_IO:
-            try: return self.function_execution_with_timeout(self.device_timeout, self._check_connection)
-            except: return False
+    def check_connection(self, timeout=None):
+        if self.lock_IO.acquire(blocking=False):
+            try:
+                try: return self.function_execution_with_timeout(self.device_timeout if timeout is None else timeout, self._check_connection)
+                except: return False
+            finally: self.lock_IO.release()
+        else: raise ResourceBusyException("IO resource busy")
     
-    def close_connection(self):
-        with self.lock_IO:
-            try: self.function_execution_with_timeout(self.device_timeout, self._close_connection)
-            except: pass
-            self.device_connection = None
-    
-    def open_connection(self):
-        with self.lock_IO:
-            self.close_connection()
-            self.device_connection = self.function_execution_with_timeout(self.device_timeout, self._open_connection)
-            self.reset_buffer()
-    
-    def read(self):
-        with self.lock_IO:
-            return self.function_execution_with_timeout(self.device_timeout, self._read)
-    
-    def write(self, data):
-        with self.lock_IO:
-            self.function_execution_with_timeout(self.device_timeout, self._write, data)
-    
-    def write_and_read(self, data):
-        with self.lock_IO:
-            self.write(data)
-            return self.read()
+    def close_connection(self, timeout=None):
+        try: self.function_execution_with_timeout(self.device_timeout if timeout is None else timeout, self._close_connection)
+        except: pass
+        self.device_connection = None
+
+    def open_connection(self, timeout=None):
+        self.close_connection(timeout)
+        self.device_connection = self.function_execution_with_timeout(self.device_timeout if timeout is None else timeout, self._open_connection)
+        self.reset_buffer(timeout)
+
+    def read(self, timeout=None):
+        if self.lock_IO.acquire(blocking=False):
+            try:
+                return self.function_execution_with_timeout(self.device_timeout if timeout is None else timeout, self._read)
+            finally: self.lock_IO.release()
+        else: raise ResourceBusyException("IO resource busy")
+
+    def write(self, data, timeout=None):
+        if self.lock_IO.acquire(blocking=False):
+            try:
+                self.function_execution_with_timeout(self.device_timeout if timeout is None else timeout, self._write, data)
+            finally: self.lock_IO.release()
+        else: raise ResourceBusyException("IO resource busy")
+
+    def write_and_read(self, data, timeout=None):
+        if self.lock_IO.acquire(blocking=False):
+            try:
+                return self.function_execution_with_timeout(self.device_timeout if timeout is None else timeout, self._write_and_read, data)
+            finally: self.lock_IO.release()
+        else: raise ResourceBusyException("IO resource busy")
+
+    def multiple_readings(self, timeout=None, timeout_close=None):
+        if self.lock_IO.acquire(blocking=False):
+            try:
+                while True:
+                    state = yield
+                    if state == StateMultipleReadings.START:
+                        msg = yield  
+                        self.write(msg, timeout)
+                    elif state == StateMultipleReadings.STOP:
+                        msg = yield  
+                        self.write(msg, timeout)
+                    elif state == StateMultipleReadings.CLOSE:
+                        while True:
+                            try: self.read(timeout_close)
+                            except TimeoutException: break
+                        self.reset_buffer(timeout)
+                        return
+                    elif state == StateMultipleReadings.NEXT:
+                        result = self.read(timeout)
+                        yield result
+            finally: self.lock_IO.release()
+        else: raise ResourceBusyException("IO resource busy")
 
 
 class USBIODevice(IODevice):
@@ -174,21 +209,28 @@ class USBIODevice(IODevice):
 class Arduino(USBIODevice):
     def __init__(self, info_device={}, device_timeout=5):
         super().__init__(info_device, device_timeout)
+
+    def _write_and_read(self, data):
+        self._reset_buffer()
+        self._write(data)
+        result = self._read()
+        if not("command" in data and "command" in result and data["command"]==result["command"]): raise ArduinoCommunicationException("Response received different from request sent")
+        return result
     
     def _reset_buffer(self):
         if not (isinstance(self.device_connection, serial.Serial)):
             raise ValueError("Invalid connection")
         
         self.device_connection.reset_input_buffer()
+        self.device_connection.reset_output_buffer()
 
     def _check_connection(self):
         if not (isinstance(self.device_connection, serial.Serial)):
             raise ValueError("Invalid connection")
         
         if self.device_connection.is_open:
-            self._write({"command":"is_alive"})
-            message_arduino_read = self._read()
-            if message_arduino_read is not None: return True
+            result = self._write_and_read({"command":"is_alive"})
+            if result: return True
         return False
     
     def _close_connection(self):
@@ -230,12 +272,14 @@ class Arduino(USBIODevice):
                 raise ArduinoCommunicationException("Timeout expired while waiting for data")
 
         if response: 
+            #print(f"Read: {response}")
             result = json.loads(response)
-            if "code" in result and result["code"] == "ERROR": raise ArduinoCommunicationException("Bad json")
+            if "code" in result and result["code"] == "ERROR": raise ArduinoCommunicationException(f"Bad json: {result}")
             return result
         else: return json.loads("{}")
     
     def _write(self, data):
+        #print(f"Write: {data}")
         if not (isinstance(self.device_connection, serial.Serial)):
             raise ValueError("Invalid connection")
         if not (isinstance(data, dict)):
@@ -245,17 +289,31 @@ class Arduino(USBIODevice):
 
 
 class RawData(dict):
+    def __init__(self, max_num_samples, num_lc):
+        super().__init__()
+        self["initial_time"] = 0.0
+        self["unsliced_time"] = np.zeros(max_num_samples, dtype=float)
+        self["unsliced_lc"] = np.zeros((num_lc, max_num_samples), dtype=float)
+        self["size"] = 0
+        self["max_size"] = max_num_samples
+
     def __getitem__(self, key):
         if key == 'time':
-            time = self['unsliced_time']
-            size = self['size']
-            return time[:size]
+            return self["unsliced_time"][:self["size"]]
         elif key == 'lc':
-            lc = self['unsliced_lc']
-            size = self['size']
-            return lc[:, :size]
-
+            return self["unsliced_lc"][:, :self["size"]]
         return super().__getitem__(key)
+
+    def append(self, time_value, lc_values):
+        i = self["size"]
+
+        if i >= self["max_size"]: raise IndexError("RawData full: max size reached")
+
+        if i==0: self["initial_time"] = time_value
+
+        self["unsliced_time"][i] = time_value-self["initial_time"]
+        self["unsliced_lc"][:, i] = lc_values
+        self["size"] += 1
 
 
 
@@ -268,50 +326,48 @@ class DataRappresentor():
             "mass": 0.0,
             "acceleration_of_gravity": 9.81
         }
-        self.stop_representation=False # force stop representation
-        self.request_stop_representation=False 
+        self.stop_representation=True # force stop representation
+        self.request_stop_representation=True
     
-        self.function_recall_time=2 # ms (milliseconds)
-        
-        self.initializationRawData(0)
-        self.stopRepresentation()
+        self.function_recall_time=1 # ms (milliseconds)
+        self.get_timeout = 3
 
 
     def run(self, func1, args1, func2, args2):
         if not self.stop_representation:
             try:
-                data = data_dq.popleft()
+                data = data_queue.get(timeout=self.get_timeout)
                 if data is not None:
-                    self.addData(data)
-                    if not self.request_stop_representation:
-                        smart_update_label(label_status_acquisition, "Acquisition in progress...", "green")
+                    if isinstance(data, StateDataAcquirer) and data==StateDataAcquirer.FINISH:
                         func1(*args1)
-                    elif self.request_stop_representation:
-                        smart_update_label(label_status_acquisition, "Saving the last samples...", "orange")
-                        while not self.stop_representation:
-                            data = data_dq.popleft()
-                            self.addData(data)
+                        self.stopRepresentation()
+                        smart_update_label(label_status_acquisition, "Analysis in progress...", "purple")
+                        func2(*args2)
+                        smart_update_label(label_status_acquisition, "Acquisition stopped", "black")
+                    else:
+                        self.addData(data)
+                        if not self.request_stop_representation:
+                            func1(*args1)
+                            smart_update_label(label_status_acquisition, "Acquisition in progress...", "green")
+                        elif self.request_stop_representation:
+                            smart_update_label(label_status_acquisition, "Saving the last samples...", "orange")
 
                 else: self.analysisError()
-            except IndexError as e: # deque is empty
-                #print(f"IndexError: {e}")
-                if not self.request_stop_representation:
-                    smart_update_label(label_status_acquisition, "Waiting for data...", "blue")
-                elif self.request_stop_representation:
-                    func1(*args1)
-                    self.stopRepresentation()
-                    smart_update_label(label_status_acquisition, "Analysis in progress...", "purple")
-                    func2(*args2)
-                    smart_update_label(label_status_acquisition, "Acquisition stopped", "black")
-            except tk.TclError as e:
-                #print(f"TclError: {e}")
-                pass
-            except Exception as e:
-                #print(f"Exception: {e}")
+            except queue.Empty as e: 
+                show_warning("Error!", "Waiting too long to receive data")
                 self.analysisError()
+            except IndexError as e:
+                show_warning("Attention!", "You have reached the maximum number of saveable champions.")
                 func1(*args1)
+                self.stopRepresentation()
+                smart_update_label(label_status_acquisition, "Analysis in progress...", "purple")
                 func2(*args2)
+                smart_update_label(label_status_acquisition, "Acquisition stopped", "black")
+            except Exception as e:
+                self.analysisError()
 
+
+        if not self.stop_representation:
             func = partial(self.run, func1, args1, func2, args2)
             self.after_id = root.after(self.function_recall_time, func)
 
@@ -319,21 +375,13 @@ class DataRappresentor():
     def analysisError(self):
         smart_update_label(label_status_acquisition, "Error in analysis!", "red")
         self.stopRepresentation()
-        if not check_device_connection():
+        if verify_the_possibility_of_communicating()==StateCommunicationDevice.AVAILABLE_NOT_CONNECTED:
             close_device_connection()
             func_Focus_combobox_menu_device(None)
 
 
     def initializationRawData(self, max_num_samples):
-        raw_data = RawData()
-        raw_data["initial_time"] = 0.0
-        raw_data["unsliced_time"] = np.zeros(max_num_samples, dtype=float)
-        raw_data["unsliced_lc"] = np.zeros((len(info_load_cells), max_num_samples), dtype=float)
-        raw_data["size"] = 0
-        raw_data["max_size"] = max_num_samples
-        self.raw_data = raw_data
-
-
+        self.raw_data = RawData(max_num_samples, len(info_load_cells))
 
         
     def analysisJumpPhase(self, analysis_result_calculation, analysis_callback, additional_params):
@@ -364,7 +412,7 @@ class DataRappresentor():
 
                 update_plot()
 
-            except: show_warning("Error", "Problem in the analyses")
+            except Exception as e: show_warning("Error", f"Problem in the analyses: {e}")
 
 
         def clear_plotted_analysis_elements():
@@ -390,8 +438,8 @@ class DataRappresentor():
         def update_view_x(start_visible_time):
             total_duration = self.raw_data["time"][-1] - self.raw_data["time"][0]
             visible_duration = total_duration if total_duration < entries_params["window_duration"]["info"]["value"] else entries_params["window_duration"]["info"]["value"]
-            scroll.config(to=self.raw_data["time"][-1]-entries_params["window_duration"]["info"]["value"])
-
+            scroll_x.config(to=self.raw_data["time"][-1]-entries_params["window_duration"]["info"]["value"])
+            var_scroll_x.set(start_visible_time)
             ax.set_xlim(start_visible_time, start_visible_time+visible_duration)
             update_plot()
 
@@ -610,8 +658,9 @@ class DataRappresentor():
         fig.canvas.mpl_connect('pick_event', on_pick)
 
         # ---------------- Scrollbar ----------------
-        scroll = ttk.Scale(plot_frame, from_=0, orient='horizontal', length=800, command=lambda val: update_view_x(float(val)))
-        scroll.pack(fill=tk.X, expand=False)
+        var_scroll_x = tk.DoubleVar()
+        scroll_x = ttk.Scale(plot_frame, from_=0, orient='horizontal', length=800, variable=var_scroll_x, command=lambda val: update_view_x(float(val)))
+        scroll_x.pack(fill=tk.X, expand=False)
 
         # ---------------- Parametri ----------------
         param_frame = ttk.Frame(win, padding=10)
@@ -1099,9 +1148,8 @@ class DataRappresentor():
 
     def startRepresentation(self, test):
         smart_update_label(label_status_acquisition, "Initialization...", "black")
+        
         self.stopRepresentation()
-        data_acquirer.stopAcquisition()
-        data_dq.clear()
 
         clear_frame(frame_control_test)
         clear_frame(frame_indicator)
@@ -1111,39 +1159,44 @@ class DataRappresentor():
             automatic_scaling()
 
             self.initializationRawData(max_num_samples)
-            data_acquirer.startAcquisition()
+            if not data_acquirer.startAcquisition(): raise Exception("Problems with acquisition")
+
             self.stop_representation=False
             self.request_stop_representation=False
+
             func = partial(self.run, func1, args1, func2, args2)
             self.after_id = root.after(self.function_recall_time, func)
-        except ValueError as e: 
+
+        except Exception as e: 
             self.analysisError()
             show_warning("Attention!", e)
 
         
-
     def requestStopRepresentation(self):
-        data_acquirer.stopAcquisition()
+        data_acquirer.requestStopAcquisition()
         self.request_stop_representation=True
 
     def stopRepresentation(self):
         try: root.after_cancel(self.after_id)
         except: pass
+
         self.stop_representation=True
-        self.requestStopRepresentation()
+        self.request_stop_representation=True
+
+        data_acquirer.stopAcquisition()
+        
+        while not data_queue.empty():
+            try: data_queue.get_nowait()
+            except queue.Empty: break
+        
+        smart_update_label(label_status_acquisition, "Acquisition stopped", "black")
 
     
     def addData(self, data):
         if self.raw_data and data:
             if None not in list(data["values"].values()):
-                if self.raw_data["size"]<self.raw_data["max_size"]:
-                    if self.raw_data["size"]==0:  self.raw_data["initial_time"] = data["time"]
-                    self.raw_data["unsliced_time"][self.raw_data["size"]] = data["time"]-self.raw_data["initial_time"]
-                    for i, k in enumerate(info_load_cells): self.raw_data["unsliced_lc"][i, self.raw_data["size"]] = data["values"][k]
-                    self.raw_data["size"] += 1
-                else:
-                    show_warning("Attention!", "You have reached the maximum number of saveable champions.")
-                    self.stopRepresentation()
+                lc_values = [data["values"][k] for k in info_load_cells]
+                self.raw_data.append(data["time"], lc_values)
 
 
 
@@ -1156,51 +1209,130 @@ class DataAcquirer(threading.Thread):
 
         self.acquisition_activity=True
         self.acquisition=False
-        self.acquiring=threading.Lock()
 
-        self.time_sleep_acquiring = 0.0005
-        self.time_sleep_not_acquiring=0.3
+        self.acquiring=threading.RLock()
 
-        self._stopAcquisition()
+        self.events = queue.Queue()
+        self.next_state = queue.Queue()
+        self.reader=None
+
+        self.time_acquiring = 0.0005
     
+
     def run(self):
         while self.acquisition_activity:
             with self.acquiring:
-                if self.acquisition:
-                    try: data_dq.append(arduino.read())
-                    except Exception as e: 
-                        #print(e)
-                        data_dq.append(None)
-                        self._stopAcquisition()
-                    
 
-            if self.acquisition: time.sleep(self.time_sleep_acquiring)
-            else: time.sleep(self.time_sleep_not_acquiring)
+                try:
+                    state_acquisition = self.next_state.get(block=False)
 
+                    #print(f"State acquisition: {state_acquisition}")
 
-    def _startAcquisition(self):
-        self.acquisition=True
-        try: 
-            if arduino is not None: arduino.write_and_read({"command":"start_reading"})
-        except: pass
+                    if state_acquisition == StateDataAcquirer.START:
+                        
+                        try:
+                            self.reader = arduino.multiple_readings(timeout_close=0.5)
+                            next(self.reader)
+                            self.reader.send(StateMultipleReadings.START)
+                            self.reader.send({"command":"start_reading"})
+                            
+                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.GET)
+                        except Exception as e: 
+                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.STOP)
+                            self.events.put(e)
+                        finally: self.events.put(StateDataAcquirer.START)
+
+                    elif state_acquisition == StateDataAcquirer.STOP:
+
+                        try:
+                            self.reader.send(StateMultipleReadings.STOP)
+                            self.reader.send({"command":"stop_reading"})
+
+                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.GET_LAST)
+                        except Exception as e: 
+                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.CLOSE)
+                            self.events.put(e)
+                        finally: self.events.put(StateDataAcquirer.STOP)
+
+                    elif state_acquisition == StateDataAcquirer.CLOSE:
+
+                        try:
+                            try: self.reader.send(StateMultipleReadings.CLOSE)
+                            except StopIteration: pass
+                            self.reader = None
+                        except Exception as e: self.events.put(e)
+                        finally:
+                            self.events.put(StateDataAcquirer.CLOSE)
+
+                    elif state_acquisition == StateDataAcquirer.GET:
+                        
+                        try:
+                            result = self.reader.send(StateMultipleReadings.NEXT)
+                            self.reader.send(None)
+                            data_queue.put(result)
+
+                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.GET)
+                        except Exception as e:
+                            data_queue.put(None)
+                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.STOP)
+
+                    elif state_acquisition == StateDataAcquirer.GET_LAST:
+
+                        try:
+                            result = self.reader.send(StateMultipleReadings.NEXT)
+                            self.reader.send(None)
+                            #print(f"---------------\n{result}\n---------------")
+                            
+                            if "command" in result and result["command"] == "stop_reading": 
+                                data_queue.put(StateDataAcquirer.FINISH)
+                                if self.next_state.empty(): self.next_state.put(StateDataAcquirer.CLOSE)
+                            elif "command" in result and result["command"] != "stop_reading": 
+                                raise Exception("Problems reading")
+                            else: 
+                                data_queue.put(result)
+                                if self.next_state.empty(): self.next_state.put(StateDataAcquirer.GET_LAST)
+
+                        except Exception as e:
+                            print(f"Non lo so: {e}")
+                            data_queue.put(None)
+                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.CLOSE)
+                            
+                except queue.Empty: pass
+
+            time.sleep(self.time_acquiring)
+
 
     def startAcquisition(self):
-        with self.acquiring:
-            self._startAcquisition()
+        with self.acquiring: 
+            self.next_state.put(StateDataAcquirer.STOP)
+            self.next_state.put(StateDataAcquirer.CLOSE)
+            self.next_state.put(StateDataAcquirer.START)
+        return not self.check_problem(StateDataAcquirer.START)
 
-    def _stopAcquisition(self):
-        self.acquisition=False
-        try: 
-            if arduino is not None: arduino.write_and_read({"command":"stop_reading"})
-        except: pass
+    def requestStopAcquisition(self):
+        with self.acquiring: 
+            self.next_state.put(StateDataAcquirer.STOP)
+        return not self.check_problem(StateDataAcquirer.STOP)
 
     def stopAcquisition(self):
-        with self.acquiring: 
-            self._stopAcquisition()
+        with self.acquiring:
+            self.next_state.put(StateDataAcquirer.STOP)
+            self.next_state.put(StateDataAcquirer.CLOSE)
+        return not self.check_problem(StateDataAcquirer.CLOSE)
 
     def stopAcquisitionActivity(self):
+        self.stopAcquisition()
         self.acquisition_activity=False
-        self._stopAcquisition()
+        
+
+    def check_problem(self, state):
+        problem = False
+        while True:
+            event = self.events.get()
+            if isinstance(event, StateDataAcquirer) and event==state: break
+            elif isinstance(event, StateDataAcquirer) and event!=state: problem = False
+            elif not isinstance(event, StateDataAcquirer): problem = True
+        return problem
     
 
 
@@ -1236,18 +1368,15 @@ def get_connected_USB_devices():
     list_info_device = list_device
 
 def open_device_connection(info_device, timeout):
-    global arduino
+    global arduino, info_load_cells
     close_device_connection()
     smart_update_label(label_status_connection, "Connecting...", "orange")
     try: 
         arduino = Arduino(info_device, timeout) 
         arduino.open_connection()
-        if check_device_connection():
-            get_info_load_cells()
-            command_button_scale_tare()
-        else:
-            close_device_connection()
-            func_Focus_combobox_menu_device(None)
+        info_load_cells = arduino.write_and_read({"command":"get_info"})["lc"]
+        command_button_scale_tare()
+        verify_the_possibility_of_communicating()
     except:
         close_device_connection()
         func_Focus_combobox_menu_device(None)
@@ -1259,12 +1388,19 @@ def clear_frame(frame):
     
 
 def close_device_connection():
+    global arduino, info_load_cells
+    info_load_cells = []
+
     smart_update_label(label_status_acquisition, "Acquisition stopped", "black")
     smart_update_label(label_status_connection, "Disconnecting...", "black")
     smart_update_label(label_scale_tare, "Not calibrated!", "red")
+
     data_rappresentor.stopRepresentation()
+
     if arduino is not None: arduino.close_connection()
-    check_device_connection()
+    arduino = None
+
+    verify_the_possibility_of_communicating()
 
 def func_Focus_combobox_menu_device(event):
     get_connected_USB_devices()
@@ -1278,50 +1414,45 @@ def func_ComboboxSelected_combobox_menu_device(event):
     selected = stringvar_menu_device.get()
     for info_device in list_info_device:
         if info_device["port"]==selected:
-            info_device["baudrate"] = 460800
+            info_device["baudrate"] = 921600 # 460800
             open_device_connection(info_device, 2)
             break
         
-def check_device_connection():
-    if arduino is not None and arduino.check_connection(): 
-        smart_update_label(label_status_connection, "Connected", "green")
-        return True
+def verify_the_possibility_of_communicating():
+    try:
+        if arduino is not None and arduino.check_connection(): 
+            smart_update_label(label_status_connection, "Available and connected", "green")
+            return StateCommunicationDevice.AVAILABLE_CONNECTED
+        else:
+            smart_update_label(label_status_connection, "Available but not connected", "red")
+            return StateCommunicationDevice.AVAILABLE_NOT_CONNECTED
+    except ResourceBusyException: 
+        smart_update_label(label_status_connection, "Not available", "red")
+        return StateCommunicationDevice.NOT_AVAILABLE
 
-    smart_update_label(label_status_connection, "Not Connected", "red")
-    return False
 
 def command_button_test(test):
-    if check_device_connection() and info_load_cells: data_rappresentor.startRepresentation(test)
-    else: 
-        close_device_connection()
-        func_Focus_combobox_menu_device(None)
-
-def command_button_stop_test():
-    data_rappresentor.requestStopRepresentation()
+    if verify_the_possibility_of_communicating()==StateCommunicationDevice.AVAILABLE_CONNECTED and info_load_cells: data_rappresentor.startRepresentation(test)
 
 def func_WM_DELETE_WINDOW():
     data_rappresentor.stopRepresentation()
+    close_device_connection()
     data_acquirer.stopAcquisitionActivity()
     data_acquirer.join()
-    close_device_connection()
     root.quit()
     root.destroy()
 
 def command_button_scale_tare():
     smart_update_label(label_scale_tare, "Calibration...", "black")
 
-    if check_device_connection():
-        try:
-            result = arduino.write_and_read({"command":"scale_tare"})["lc"]
-            result_string = ""
-            for i, k in enumerate(info_load_cells):
-                result_string += f"{k}: {result[k]}"
-                if i < len(info_load_cells)-1: result_string += " | "
-            smart_update_label(label_scale_tare, result_string, "black")
-        except Exception as e:
-            #print(e)
-            smart_update_label(label_scale_tare, "Not calibrated!", "red")
-    else: 
+    try:
+        result = arduino.write_and_read({"command":"scale_tare"})["lc"]
+        result_string = ""
+        for i, k in enumerate(info_load_cells):
+            result_string += f"{k}: {result[k]}"
+            if i < len(info_load_cells)-1: result_string += " | "
+        smart_update_label(label_scale_tare, result_string, "black")
+    except Exception as e:
         close_device_connection()
         func_Focus_combobox_menu_device(None)
 
@@ -1341,22 +1472,6 @@ def show_warning(title, message):
     messagebox.showwarning(title, message)
 
 
-def get_info_load_cells():
-    global info_load_cells
-    info_load_cells=[]
-
-    if check_device_connection():
-        try:
-            result = arduino.write_and_read({"command":"get_info"})
-            info_load_cells = result["lc"]
-        except:
-            close_device_connection()
-            func_Focus_combobox_menu_device(None)
-    else:
-        close_device_connection()
-        func_Focus_combobox_menu_device(None)
-
-
 
 
 # -------------------------------------
@@ -1366,8 +1481,11 @@ list_info_device = []
 
 root = tk.Tk()
 arduino = None
-data_dq = deque()
+data_queue = queue.Queue()
+
 data_acquirer = DataAcquirer()
+data_acquirer.start()
+
 data_rappresentor = DataRappresentor()
 
 
@@ -1411,14 +1529,14 @@ button_test_depth_jump = tk.Button(frame_acquisition, text="Depth jump", command
 button_test_depth_jump.pack(side=tk.LEFT, padx=20)
 button_test_calculate_mass = tk.Button(frame_acquisition, text="Calculate mass", command=lambda: command_button_test(data_rappresentor.testCalculateMass))
 button_test_calculate_mass.pack(side=tk.LEFT, padx=20)
-button_stop_test = tk.Button(frame_acquisition, text="Stop test", command=command_button_stop_test)
+button_stop_test = tk.Button(frame_acquisition, text="Stop test", command=data_rappresentor.requestStopRepresentation)
 button_stop_test.pack(side=tk.LEFT, padx=20)
 button_force_stop = tk.Button(frame_acquisition, text="Force stop", command=data_rappresentor.stopRepresentation)
 button_force_stop.pack(side=tk.LEFT, padx=20)
 
 frame_acquisition_status = tk.Frame(root)
 frame_acquisition_status.pack(pady=10)
-label_status_acquisition = tk.Label(frame_acquisition_status, text=f"Acquisition status: Stop", font=("Arial", 15))
+label_status_acquisition = tk.Label(frame_acquisition_status, text=f"Acquisition stopped", font=("Arial", 15))
 label_status_acquisition.pack(side=tk.LEFT, padx=20)
 
 # Control test section
@@ -1432,9 +1550,6 @@ frame_indicator.pack(pady=10)
 # Chart section
 frame_chart = tk.Frame(root)
 frame_chart.pack(fill=tk.BOTH, expand=True)
-
-# Starting data acquirer
-data_acquirer.start()
 
 
 automatic_scaling()
