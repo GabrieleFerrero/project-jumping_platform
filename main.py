@@ -1281,7 +1281,6 @@ class DataAcquirer(threading.Thread):
                         try:
                             result = self.reader.send(StateMultipleReadings.NEXT)
                             self.reader.send(None)
-                            #print(f"---------------\n{result}\n---------------")
                             
                             if "command" in result and result["command"] == "stop_reading": 
                                 data_queue.put(StateDataAcquirer.FINISH)
@@ -1293,7 +1292,6 @@ class DataAcquirer(threading.Thread):
                                 if self.next_state.empty(): self.next_state.put(StateDataAcquirer.GET_LAST)
 
                         except Exception as e:
-                            print(f"Non lo so: {e}")
                             data_queue.put(None)
                             if self.next_state.empty(): self.next_state.put(StateDataAcquirer.CLOSE)
                             
