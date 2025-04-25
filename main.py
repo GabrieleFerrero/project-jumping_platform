@@ -554,7 +554,7 @@ class DataRappresentor():
 
         def confirm_and_close():
             if selection_area["start"] is None or selection_area["end"] is None or results_analysis is None: return
-            analysis_callback(selection_area["start"], selection_area["end"], results_analysis)
+            analysis_callback(selection_area["start"], selection_area["end"], results_analysis, entries_params)
             #win.destroy()
 
         
@@ -613,7 +613,7 @@ class DataRappresentor():
 
         selection_area = {"start":None, "end":None}
         params = [
-            {"label":"Savgol Window Length","type":int,"value":11,"key":"savgol_filter_window_length","ptype":"processing","cond":lambda x: 1 <= x <= np.iinfo(np.uint32).max and x % 2 == 1},
+            {"label":"Savgol Window Length","type":int,"value":51,"key":"savgol_filter_window_length","ptype":"processing","cond":lambda x: 1 <= x <= np.iinfo(np.uint32).max and x % 2 == 1},
             {"label":"Savgol Polyorder","type":int,"value":3,"key":"savgol_filter_polyorder","ptype":"processing","cond":lambda x: 0 <= x <= np.iinfo(np.uint32).max},
             {"label":"Enable filter","type":bool,"value":True,"key":"use_filter","ptype":"processing","cond":lambda x: True},
             {"label":"Window duration (s)","type":float,"value":2,"key":"window_duration","ptype":"interface","cond":lambda x: 0 < x}
@@ -747,10 +747,16 @@ class DataRappresentor():
             return result, plotted_elements
         
 
-        def analysis_callback(start_idx, end_idx, results_analysis):
+        def analysis_callback(start_idx, end_idx, results_analysis, entries_params):
             
             force = np.sum(self.raw_data["lc"], axis=0)
+            if entries_params["use_filter"]["info"]["value"]:
+                force_filtered = savgol_filter(force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
+                force = force_filtered
+
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
+
+            force_net = force - weight
 
             time_contact = self.raw_data["time"][results_analysis["takeoff"]] - self.raw_data["time"][results_analysis["start_amortization"]]
             time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
@@ -955,15 +961,16 @@ class DataRappresentor():
             return result, plotted_elements
         
 
-        def analysis_callback(start_idx, end_idx, results_analysis):
+        def analysis_callback(start_idx, end_idx, results_analysis, entries_params):
 
             force = np.sum(self.raw_data["lc"], axis=0)
+            if entries_params["use_filter"]["info"]["value"]:
+                force_filtered = savgol_filter(force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
+                force = force_filtered
+
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
+
             force_net = force - weight
-         
-            
-            time_contact = self.raw_data["time"][results_analysis["takeoff"]] - self.raw_data["time"][results_analysis["start_movement"]]
-            time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
 
             impulse = np.trapz(force_net[results_analysis["start_deceleration"]:results_analysis["takeoff"]], self.raw_data["time"][results_analysis["start_deceleration"]:results_analysis["takeoff"]])
 
@@ -972,6 +979,9 @@ class DataRappresentor():
 
             v0 = impulse / self.jump_data["mass"]
             h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
+
+            time_contact = self.raw_data["time"][results_analysis["takeoff"]] - self.raw_data["time"][results_analysis["start_movement"]]
+            time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
 
             
             smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
