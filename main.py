@@ -750,6 +750,7 @@ class DataRappresentor():
         def analysis_callback(start_idx, end_idx, results_analysis):
             
             force = np.sum(self.raw_data["lc"], axis=0)
+            weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
 
             time_contact = self.raw_data["time"][results_analysis["takeoff"]] - self.raw_data["time"][results_analysis["start_amortization"]]
             time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
@@ -957,18 +958,25 @@ class DataRappresentor():
         def analysis_callback(start_idx, end_idx, results_analysis):
 
             force = np.sum(self.raw_data["lc"], axis=0)
-
+            weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
+            force_net = force - weight
+         
+            
             time_contact = self.raw_data["time"][results_analysis["takeoff"]] - self.raw_data["time"][results_analysis["start_movement"]]
             time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
 
-            F_avg = np.mean(force[results_analysis["start_movement"]:results_analysis["takeoff"]])
-            v0 = math.sqrt((2* F_avg * time_contact) / self.jump_data["mass"])
+            impulse = np.trapz(force_net[results_analysis["start_deceleration"]:results_analysis["takeoff"]], self.raw_data["time"][results_analysis["start_deceleration"]:results_analysis["takeoff"]])
+
+            #F_avg = np.mean(force[results_analysis["start_movement"]:results_analysis["takeoff"]])
+            #v0 = math.sqrt((2* F_avg * time_contact) / self.jump_data["mass"])
+
+            v0 = impulse / self.jump_data["mass"]
             h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
 
             
             smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
             smart_update_label(label_indicator_jump_height, f"Jump height: {round(h*100,2)} cm", "black")
-            smart_update_label(label_indicator_average_reaction_force, f"Average reaction force: {round(F_avg,2)} N", "black")
+            smart_update_label(label_indicator_average_reaction_force, f"Impulse: {round(impulse,2)} m*kg/s", "black")
             smart_update_label(label_indicator_jumping_speed, f"Jumping speed: {round(v0,2)} m/s", "black")
             smart_update_label(label_indicator_flight_time, f"Flight time: {round(time_flight,5)} s", "black")
             smart_update_label(label_indicator_time_contact, f"Contact time: {round(time_contact,5)} s", "black")
@@ -1019,7 +1027,7 @@ class DataRappresentor():
         label_indicator_jump_height = tk.Label(label_frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
         label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
 
-        label_indicator_average_reaction_force = tk.Label(label_frame_indicator_general_data, text=f"Average reaction force: {0.0} N", font=("Arial", 12))
+        label_indicator_average_reaction_force = tk.Label(label_frame_indicator_general_data, text=f"Impulse: {0.0} m*Kg/s", font=("Arial", 12))
         label_indicator_average_reaction_force.pack(side=tk.LEFT, padx=20)
 
         label_indicator_jumping_speed = tk.Label(label_frame_indicator_general_data, text=f"Jumping speed: {0.0} m/s", font=("Arial", 12))
