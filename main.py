@@ -16,6 +16,7 @@ from functools import partial
 from scipy.signal import savgol_filter
 from matplotlib.patches import Rectangle
 import math
+from scipy.integrate import cumtrapz
 
 
 
@@ -396,23 +397,22 @@ class DataRappresentor():
 
             results_analysis = None
 
-            try:
+            selected_time = self.raw_data["time"][selection_area["start"]:selection_area["end"]+1]
+            selected_lc = self.raw_data["lc"][:, selection_area["start"]:selection_area["end"]+1]
+            selected_force = np.sum(selected_lc, axis=0)
+            
+            if entries_params["use_filter"]["info"]["value"]:
+                selected_force_filtered = savgol_filter(selected_force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
+                plotted_elements["data_analysis"].append(ax.plot(selected_time, selected_force_filtered, label='Filtered force', color='gray')[0])
+                selected_force = selected_force_filtered
 
-                selected_time = self.raw_data["time"][selection_area["start"]:selection_area["end"]+1]
-                selected_lc = self.raw_data["lc"][:, selection_area["start"]:selection_area["end"]+1]
-                selected_force = np.sum(selected_lc, axis=0)
-                
-                if entries_params["use_filter"]["info"]["value"]:
-                    selected_force_filtered = savgol_filter(selected_force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
-                    plotted_elements["data_analysis"].append(ax.plot(selected_time, selected_force_filtered, label='Filtered force', color='gray')[0])
-                    selected_force = selected_force_filtered
-                                    
+            try:        
                 results_analysis, plot_el = analysis_result_calculation(selected_force, selected_time, selection_area["start"], ax, entries_params)
                 plotted_elements["data_analysis"] += plot_el
 
-                update_plot()
-
             except Exception as e: show_warning("Error", f"Problem in the analyses: {e}")
+
+            update_plot()
 
 
         def clear_plotted_analysis_elements():
@@ -554,7 +554,16 @@ class DataRappresentor():
 
         def confirm_and_close():
             if selection_area["start"] is None or selection_area["end"] is None or results_analysis is None: return
-            analysis_callback(selection_area["start"], selection_area["end"], results_analysis, entries_params)
+
+            selected_time = self.raw_data["time"][selection_area["start"]:selection_area["end"]+1]
+            selected_lc = self.raw_data["lc"][:, selection_area["start"]:selection_area["end"]+1]
+            selected_force = np.sum(selected_lc, axis=0)
+
+            if entries_params["use_filter"]["info"]["value"]:
+                selected_force_filtered = savgol_filter(selected_force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
+                selected_force = selected_force_filtered
+            
+            analysis_callback(selected_force, selected_time, selection_area["start"], results_analysis, entries_params)
             #win.destroy()
 
         
@@ -693,45 +702,66 @@ class DataRappresentor():
 
 
         def analysis_result_calculation(force, time, start_idx, ax, entries_params):
+        
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
 
-            dFdt = np.gradient(force, time)
+            start_amortization = np.where(force >= weight*(entries_params["start_threshold"]["info"]["value"]/100))[0][0]
+            weight_threshold = start_amortization + np.where(force[start_amortization:] >= weight)[0][0]
+            start_push = weight_threshold + np.where(force[weight_threshold:] < weight)[0][0]
 
-            start_amortization = np.argmax(force >= weight*(entries_params["start_threshold"]["info"]["value"]/100))
-            takeoff = start_amortization + np.argmax(force[start_amortization:] <= weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))
-            peak_amortization_force = start_amortization + np.argmax(force[start_amortization:takeoff])
-
-            start_push_off_threshold_max = peak_amortization_force + np.argmax(force[peak_amortization_force:takeoff] <= force[peak_amortization_force]*(entries_params["start_push_off_threshold_max"]["info"]["value"]/100))
-            start_push_off_threshold_min = peak_amortization_force + np.argmax(force[peak_amortization_force:takeoff] <= force[peak_amortization_force]*(entries_params["start_push_off_threshold_min"]["info"]["value"]/100))
-            start_push_off = start_push_off_threshold_max + np.abs(dFdt[start_push_off_threshold_max:start_push_off_threshold_min] - 0).argmin()
-
-            landing = takeoff + np.argmax(force[takeoff:] > weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))
+            peak_amortization_force = weight_threshold + np.argmax(force[weight_threshold:start_push])
+            start_deceleration = start_push + np.where(force[start_push:] >= weight)[0][0]
+            start_braking = start_push + np.argmin(force[start_push:start_deceleration])
+            takeoff = start_deceleration + np.where(force[start_deceleration:] <= weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))[0][0]
+            peak_takeoff_force = start_deceleration + np.argmax(force[start_deceleration:takeoff])
+            landing = takeoff + np.where(force[takeoff:] > weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))[0][0]
             peak_landing_force = landing + np.argmax(force[landing:])
+
+            # Calcola impulso negativo
+            force_net = force - weight
+            negative_impulse = np.trapz(force_net[start_push:start_deceleration], time[start_push:start_deceleration])
+            cumulative_area = cumtrapz(force_net[start_deceleration:], time[start_deceleration:], initial=0)
+            # 5. Trova quando l'area cumulativa compensa l'impulso negativo
+            balancing = start_deceleration + np.where(cumulative_area >= abs(negative_impulse))[0][0]
+
+            end_push = balancing + np.where(force[balancing:] <= weight)[0][0]
+
 
             # Save result
 
             result = {
-                "start_amortization": start_idx + start_amortization,
-                "start_push_off": start_idx + start_push_off,
-                "peak_amortization_force": start_idx + peak_amortization_force,
-                "takeoff": start_idx + takeoff,
-                "landing": start_idx + landing,
-                "peak_landing_force": start_idx + peak_landing_force
+                "start_amortization": start_amortization,
+                "peak_amortization_force": peak_amortization_force,
+                "start_push": start_push,
+                "weight_threshold": weight_threshold,
+                "start_deceleration": start_deceleration,
+                "balancing": balancing,
+                "end_push": end_push,
+                "start_braking": start_braking,
+                "takeoff": takeoff,
+                "peak_takeoff_force": peak_takeoff_force,
+                "landing": landing,
+                "peak_landing_force": peak_landing_force
             }
+
+            print(result)
 
             # ==== 3. Plot ====
 
             plotted_elements = []
 
             events = {
-                "Start amortization": start_amortization,
-                "Start push-off": start_push_off,
-                "Peak amortization force": peak_amortization_force,
+                "Start Amortization": start_amortization,
+                "Start Braking": start_braking,
+                "Balancing": balancing,
+                "End push": end_push,
+                "Start Deceleration": start_deceleration,
+                "Peak Takeoff Force": peak_takeoff_force,
                 "Takeoff": takeoff,
                 "Landing": landing,
                 "Peak Landing Force": peak_landing_force
             }
-            event_color = ['red', 'orange', 'blue', 'green', 'brown', 'purple']
+            event_color = ['red', 'orange', 'grey', 'pink', 'blue', 'green', 'brown', 'purple', 'yellow', 'gold', 'silver', 'violet']
 
             for (name, idx), color in zip(events.items(), event_color):
                 plotted_elements.append(ax.scatter(time[idx], force[idx], marker='o', color=color))
@@ -739,46 +769,44 @@ class DataRappresentor():
 
             # 2. Aree colorate per le fasi
             plotted_elements.append(ax.axvspan(time[0], time[start_amortization], color='yellow', alpha=0.2, label='Waiting for jump'))
-            plotted_elements.append(ax.axvspan(time[start_amortization], time[start_push_off], color='orange', alpha=0.2, label='Amortization Phase'))
-            plotted_elements.append(ax.axvspan(time[start_push_off], time[takeoff], color='green', alpha=0.2, label='Push-off Phase'))
+            plotted_elements.append(ax.axvspan(time[start_amortization], time[start_push], color='brown', alpha=0.2, label='Amortization Phase'))
+            plotted_elements.append(ax.axvspan(time[start_push], time[peak_takeoff_force], color='orange', alpha=0.2, label='Eccentric Phase'))
+            plotted_elements.append(ax.axvspan(time[peak_takeoff_force], time[takeoff], color='green', alpha=0.2, label='Concentric Phase'))
             plotted_elements.append(ax.axvspan(time[takeoff], time[landing], color='blue', alpha=0.2, label='Flight Phase'))
             plotted_elements.append(ax.axvspan(time[landing], time[-1], color='purple', alpha=0.2, label='Landing Phase'))
+
 
             return result, plotted_elements
         
 
-        def analysis_callback(start_idx, end_idx, results_analysis, entries_params):
-            
-            force = np.sum(self.raw_data["lc"], axis=0)
-            if entries_params["use_filter"]["info"]["value"]:
-                force_filtered = savgol_filter(force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
-                force = force_filtered
+        def analysis_callback(force, time, start_idx, results_analysis, entries_params):
 
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
-
             force_net = force - weight
-
-            time_contact = self.raw_data["time"][results_analysis["takeoff"]] - self.raw_data["time"][results_analysis["start_amortization"]]
-            time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
-
-            F_avg = np.mean(force[results_analysis["start_push_off"]:results_analysis["takeoff"]])
-            v0 = math.sqrt((2* F_avg * time_contact) / self.jump_data["mass"])
+            impulse = np.trapz(force_net[results_analysis["balancing"]:results_analysis["end_push"]], time[results_analysis["balancing"]:results_analysis["end_push"]])
+            v0 = impulse / self.jump_data["mass"]
             h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
+            
+            time_contact = time[results_analysis["takeoff"]] - time[results_analysis["start_amortization"]]
+            time_flight = time[results_analysis["landing"]]-time[results_analysis["takeoff"]]
 
             
             smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
             smart_update_label(label_indicator_jump_height, f"Jump height: {round(h*100,2)} cm", "black")
-            smart_update_label(label_indicator_average_reaction_force, f"Average reaction force: {round(F_avg,2)} N", "black")
+            smart_update_label(label_indicator_average_reaction_force, f"Impulse: {round(impulse,2)} m*kg/s", "black")
             smart_update_label(label_indicator_jumping_speed, f"Jumping speed: {round(v0,2)} m/s", "black")
             smart_update_label(label_indicator_flight_time, f"Flight time: {round(time_flight,5)} s", "black")
             smart_update_label(label_indicator_time_contact, f"Contact time: {round(time_contact,5)} s", "black")
 
-            smart_update_label(label_indicator_start_amortization, f"Start amortization: {round(self.raw_data["time"][results_analysis["start_amortization"]],5)} s", "black")
-            smart_update_label(label_indicator_start_push_off, f"Start push-off: {round(self.raw_data["time"][results_analysis["start_push_off"]],5)} s", "black")
-            smart_update_label(label_indicator_peak_amortization_force, f"Peak amortization force at {round(self.raw_data["time"][results_analysis["peak_amortization_force"]],5)} s with value {round(force[results_analysis["peak_amortization_force"]],2)} N", "black")
-            smart_update_label(label_indicator_takeoff, f"Takeoff: {round(self.raw_data["time"][results_analysis["takeoff"]],5)} s", "black")
-            smart_update_label(label_indicator_landing, f"Landing: {round(self.raw_data["time"][results_analysis["landing"]],5)} s", "black")
-            smart_update_label(label_indicator_peak_landing_force, f"Peak landing force at {round(self.raw_data["time"][results_analysis["peak_landing_force"]],5)} s with value {round(force[results_analysis["peak_landing_force"]],2)} N", "black")
+            smart_update_label(label_indicator_start_amortization, f"Start amortization: {round(time[results_analysis["start_amortization"]],5)} s", "black")
+            smart_update_label(label_indicator_peak_amortization_force, f"Peak amortization force at {round(time[results_analysis["peak_amortization_force"]],5)} s with value {round(force[results_analysis["peak_amortization_force"]],2)} N", "black")
+            smart_update_label(label_indicator_start_braking, f"Start braking at {round(time[results_analysis["start_braking"]],5)} s with value {round(force[results_analysis["start_braking"]],2)} N", "black")
+            smart_update_label(label_indicator_start_deceleration, f"Start deceleration: {round(time[results_analysis["start_deceleration"]],5)} s", "black")
+            smart_update_label(label_indicator_peak_takeoff_force, f"Peak takeoff force at {round(time[results_analysis["peak_takeoff_force"]],5)} s with value {round(force[results_analysis["peak_takeoff_force"]],2)} N", "black")
+            smart_update_label(label_indicator_takeoff, f"Takeoff: {round(time[results_analysis["takeoff"]],5)} s", "black")
+            smart_update_label(label_indicator_landing, f"Landing: {round(time[results_analysis["landing"]],5)} s", "black")
+            smart_update_label(label_indicator_peak_landing_force, f"Peak landing force at {round(time[results_analysis["peak_landing_force"]],5)} s with value {round(force[results_analysis["peak_landing_force"]],2)} N", "black")
+
 
 
 
@@ -800,8 +828,6 @@ class DataRappresentor():
             params = [
                 {"label":"Start Threshold (%)","type":float,"value":2,"key":"start_threshold","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0},
                 {"label":"Takeoff Threshold (%)","type":float,"value":5,"key":"takeoff_threshold","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0},
-                {"label":"Start Push-off Threshold Max (%)","type":float,"value":70,"key":"start_push_off_threshold_max","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0},
-                {"label":"Start Push-off Threshold Min (%)","type":float,"value":30,"key":"start_push_off_threshold_min","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0}
             ]
             analyze_btn = ttk.Button(frame_control_test, text="Analyze data", command=lambda: self.analysisJumpPhase(analysis_result_calculation, analysis_callback, params))
             analyze_btn.pack(padx=20, pady=20)
@@ -837,8 +863,8 @@ class DataRappresentor():
         label_indicator_start_amortization = tk.Label(label_frame_indicator_jump_event, text=f"Start amortization: {0.0} s", font=("Arial", 12))
         label_indicator_start_amortization.grid(row=0, column=0, sticky='w', pady=5, padx=10)
 
-        label_indicator_start_push_off = tk.Label(label_frame_indicator_jump_event, text=f"Start push-off: {0.0} s", font=("Arial", 12))
-        label_indicator_start_push_off.grid(row=0, column=1, sticky='w', pady=5, padx=10)
+        label_indicator_start_deceleration = tk.Label(label_frame_indicator_jump_event, text=f"Start deceleration: {0.0} s", font=("Arial", 12))
+        label_indicator_start_deceleration.grid(row=0, column=1, sticky='w', pady=5, padx=10)
 
         label_indicator_takeoff = tk.Label(label_frame_indicator_jump_event, text=f"Takeoff: {0.0} s", font=("Arial", 12))
         label_indicator_takeoff.grid(row=0, column=2, sticky='w', pady=5, padx=10)
@@ -849,9 +875,16 @@ class DataRappresentor():
         label_indicator_peak_amortization_force = tk.Label(label_frame_indicator_jump_event, text=f"Peak amortization force at {0.0} s with value {0.0} N", font=("Arial", 12))
         label_indicator_peak_amortization_force.grid(row=1, column=0, sticky='w', pady=5, padx=10)
 
-        label_indicator_peak_landing_force = tk.Label(label_frame_indicator_jump_event, text=f"Peak landing force at {0.0} s with value {0.0} N", font=("Arial", 12))
-        label_indicator_peak_landing_force.grid(row=1, column=2, sticky='w', pady=5, padx=10)
+        label_indicator_start_braking = tk.Label(label_frame_indicator_jump_event, text=f"Start braking at {0.0} s with value {0.0} N", font=("Arial", 12))
+        label_indicator_start_braking.grid(row=1, column=1, sticky='w', pady=5, padx=10)
 
+        label_indicator_peak_takeoff_force = tk.Label(label_frame_indicator_jump_event, text=f"Peak takeoff force at {0.0} s with value {0.0} N", font=("Arial", 12))
+        label_indicator_peak_takeoff_force.grid(row=2, column=0, sticky='w', pady=5, padx=10)
+
+        label_indicator_peak_landing_force = tk.Label(label_frame_indicator_jump_event, text=f"Peak landing force at {0.0} s with value {0.0} N", font=("Arial", 12))
+        label_indicator_peak_landing_force.grid(row=2, column=1, sticky='w', pady=5, padx=10)
+
+        
 
 
         # --------------------------------------------
@@ -900,36 +933,51 @@ class DataRappresentor():
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
 
             # Event 1: Start movement
-            start_movement = np.argmax(force <= weight*(entries_params["start_threshold"]["info"]["value"]/100))
+            start_movement = np.where(force <= weight*(entries_params["start_threshold"]["info"]["value"]/100))[0][0]
 
             # Event 3: Start deceleration = primo valore forza ~0 dopo start braking
-            start_deceleration = start_movement + np.argmax(force[start_movement:] >= weight)
+            start_deceleration = start_movement + np.where(force[start_movement:] >= weight)[0][0]
 
             # Event 2: Start braking = primo zero crossing dopo start movement
             start_braking = start_movement + np.argmin(force[start_movement:start_deceleration])
 
             # Event 5: Takeoff = primo punto dopo peak_takeoff_force con forza sotto soglia
-            takeoff = start_deceleration + np.argmax(force[start_deceleration:] <= weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))
+            takeoff = start_deceleration + np.where(force[start_deceleration:] <= weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))[0][0]
 
             # Event 4: Start concentric = primo zero crossing dopo deceleration
             peak_takeoff_force = start_deceleration + np.argmax(force[start_deceleration:takeoff])
 
             # Event 6: Landing = primo punto dopo takeoff con forza sopra soglia
-            landing = takeoff + np.argmax(force[takeoff:] > weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))
+            landing = takeoff + np.where(force[takeoff:] > weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))[0][0]
 
             # Event 7: Peak landing force = massimo dopo il landing
             peak_landing_force = landing + np.argmax(force[landing:])
 
+
+            # Calcola impulso negativo
+            force_net = force - weight
+            negative_impulse = np.trapz(force_net[start_movement:start_deceleration], time[start_movement:start_deceleration])
+            cumulative_area = cumtrapz(force_net[start_deceleration:], time[start_deceleration:], initial=0)
+            # 5. Trova quando l'area cumulativa compensa l'impulso negativo
+            balancing = start_deceleration + np.where(cumulative_area >= abs(negative_impulse))[0][0]
+
+            end_push = balancing + np.where(force[balancing:] <= weight)[0][0]
+
+
+
+
             # Save result
 
             result = {
-                "start_movement": start_idx + start_movement,
-                "start_deceleration": start_idx + start_deceleration,
-                "start_braking": start_idx + start_braking,
-                "takeoff": start_idx + takeoff,
-                "peak_takeoff_force": start_idx + peak_takeoff_force,
-                "landing": start_idx + landing,
-                "peak_landing_force": start_idx + peak_landing_force
+                "start_movement": start_movement,
+                "start_deceleration": start_deceleration,
+                "balancing": balancing,
+                "end_push": end_push,
+                "start_braking": start_braking,
+                "takeoff": takeoff,
+                "peak_takeoff_force": peak_takeoff_force,
+                "landing": landing,
+                "peak_landing_force": peak_landing_force
             }
 
             # ==== 3. Plot ====
@@ -939,13 +987,15 @@ class DataRappresentor():
             events = {
                 "Start Movement": start_movement,
                 "Start Braking": start_braking,
+                "Balancing": balancing,
+                "End push": end_push,
                 "Start Deceleration": start_deceleration,
                 "Peak Takeoff Force": peak_takeoff_force,
                 "Takeoff": takeoff,
                 "Landing": landing,
                 "Peak Landing Force": peak_landing_force
             }
-            event_color = ['red', 'orange', 'blue', 'green', 'brown', 'purple', 'yellow']
+            event_color = ['red', 'orange', 'grey', 'pink', 'blue', 'green', 'brown', 'purple', 'yellow']
 
             for (name, idx), color in zip(events.items(), event_color):
                 plotted_elements.append(ax.scatter(time[idx], force[idx], marker='o', color=color))
@@ -961,27 +1011,16 @@ class DataRappresentor():
             return result, plotted_elements
         
 
-        def analysis_callback(start_idx, end_idx, results_analysis, entries_params):
-
-            force = np.sum(self.raw_data["lc"], axis=0)
-            if entries_params["use_filter"]["info"]["value"]:
-                force_filtered = savgol_filter(force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
-                force = force_filtered
+        def analysis_callback(force, time, start_idx, results_analysis, entries_params):
 
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
-
             force_net = force - weight
-
-            impulse = np.trapz(force_net[results_analysis["start_deceleration"]:results_analysis["takeoff"]], self.raw_data["time"][results_analysis["start_deceleration"]:results_analysis["takeoff"]])
-
-            #F_avg = np.mean(force[results_analysis["start_movement"]:results_analysis["takeoff"]])
-            #v0 = math.sqrt((2* F_avg * time_contact) / self.jump_data["mass"])
-
+            impulse = np.trapz(force_net[results_analysis["balancing"]:results_analysis["end_push"]], time[results_analysis["balancing"]:results_analysis["end_push"]])
             v0 = impulse / self.jump_data["mass"]
             h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
-
-            time_contact = self.raw_data["time"][results_analysis["takeoff"]] - self.raw_data["time"][results_analysis["start_movement"]]
-            time_flight = self.raw_data["time"][results_analysis["landing"]]-self.raw_data["time"][results_analysis["takeoff"]]
+            
+            time_contact = time[results_analysis["takeoff"]] - time[results_analysis["start_movement"]]
+            time_flight = time[results_analysis["landing"]]-time[results_analysis["takeoff"]]
 
             
             smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
@@ -991,13 +1030,13 @@ class DataRappresentor():
             smart_update_label(label_indicator_flight_time, f"Flight time: {round(time_flight,5)} s", "black")
             smart_update_label(label_indicator_time_contact, f"Contact time: {round(time_contact,5)} s", "black")
 
-            smart_update_label(label_indicator_start_movement, f"Start movement: {round(self.raw_data["time"][results_analysis["start_movement"]],5)} s", "black")
-            smart_update_label(label_indicator_start_braking, f"Start braking at {round(self.raw_data["time"][results_analysis["start_braking"]],5)} s with value {round(force[results_analysis["start_braking"]],2)} N", "black")
-            smart_update_label(label_indicator_start_deceleration, f"Start deceleration: {round(self.raw_data["time"][results_analysis["start_deceleration"]],5)} s", "black")
-            smart_update_label(label_indicator_peak_takeoff_force, f"Peak takeoff force at {round(self.raw_data["time"][results_analysis["peak_takeoff_force"]],5)} s with value {round(force[results_analysis["peak_takeoff_force"]],2)} N", "black")
-            smart_update_label(label_indicator_takeoff, f"Takeoff: {round(self.raw_data["time"][results_analysis["takeoff"]],5)} s", "black")
-            smart_update_label(label_indicator_landing, f"Landing: {round(self.raw_data["time"][results_analysis["landing"]],5)} s", "black")
-            smart_update_label(label_indicator_peak_landing_force, f"Peak landing force at {round(self.raw_data["time"][results_analysis["peak_landing_force"]],5)} s with value {round(force[results_analysis["peak_landing_force"]],2)} N", "black")
+            smart_update_label(label_indicator_start_movement, f"Start movement: {round(time[results_analysis["start_movement"]],5)} s", "black")
+            smart_update_label(label_indicator_start_braking, f"Start braking at {round(time[results_analysis["start_braking"]],5)} s with value {round(force[results_analysis["start_braking"]],2)} N", "black")
+            smart_update_label(label_indicator_start_deceleration, f"Start deceleration: {round(time[results_analysis["start_deceleration"]],5)} s", "black")
+            smart_update_label(label_indicator_peak_takeoff_force, f"Peak takeoff force at {round(time[results_analysis["peak_takeoff_force"]],5)} s with value {round(force[results_analysis["peak_takeoff_force"]],2)} N", "black")
+            smart_update_label(label_indicator_takeoff, f"Takeoff: {round(time[results_analysis["takeoff"]],5)} s", "black")
+            smart_update_label(label_indicator_landing, f"Landing: {round(time[results_analysis["landing"]],5)} s", "black")
+            smart_update_label(label_indicator_peak_landing_force, f"Peak landing force at {round(time[results_analysis["peak_landing_force"]],5)} s with value {round(force[results_analysis["peak_landing_force"]],2)} N", "black")
 
         
         def func1():
