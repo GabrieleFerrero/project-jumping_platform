@@ -48,7 +48,6 @@ class StateDataAcquirer(Enum):
     CLOSE = auto()
     GET = auto()
     GET_LAST = auto()
-    WAIT = auto()
     FINISH = auto()
 
 
