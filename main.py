@@ -49,6 +49,8 @@ class StateDataAcquirer(Enum):
     GET = auto()
     GET_LAST = auto()
     FINISH = auto()
+    START_REQUEST = auto()
+    END_REQUEST = auto()
 
 
 class IODevice(ABC):
@@ -136,8 +138,12 @@ class IODevice(ABC):
     def set_info_device(self, info_device):
         self.info_device=info_device    
 
-    def reset_buffer(self, timeout=None):
-        self.function_execution_with_timeout(self.device_timeout if timeout is None else timeout, self._reset_buffer)
+    def reset_buffer(self, timeout=None, silent_time=1.0):
+        timeout = self.device_timeout if timeout is None else timeout
+
+        if silent_time>=timeout: raise Exception("Problem with timing")
+
+        self.function_execution_with_timeout(timeout, self._reset_buffer, silent_time)
 
     def check_connection(self, timeout=None):
         if self.lock_IO.acquire(blocking=False):
@@ -174,11 +180,11 @@ class IODevice(ABC):
     def write_and_read(self, data, timeout=None):
         if self.lock_IO.acquire(blocking=False):
             try:
-                return self.function_execution_with_timeout(self.device_timeout if timeout is None else timeout, self._write_and_read, data)
+                return self.function_execution_with_timeout(self.device_timeout*2 if timeout is None else timeout, self._write_and_read, data)
             finally: self.lock_IO.release()
         else: raise ResourceBusyException("IO resource busy")
 
-    def multiple_readings(self, timeout=None, timeout_close=None):
+    def multiple_readings(self, timeout=None, silent_time_reset_buffer=None):
         if self.lock_IO.acquire(blocking=False):
             try:
                 while True:
@@ -190,10 +196,8 @@ class IODevice(ABC):
                         msg = yield  
                         self.write(msg, timeout)
                     elif state == StateMultipleReadings.CLOSE:
-                        while True:
-                            try: self.read(timeout_close)
-                            except TimeoutException: break
-                        self.reset_buffer(timeout)
+                        try: self.reset_buffer(silent_time=silent_time_reset_buffer)
+                        except TimeoutException: break
                         return
                     elif state == StateMultipleReadings.NEXT:
                         result = self.read(timeout)
@@ -210,6 +214,8 @@ class Arduino(USBIODevice):
     def __init__(self, info_device={}, device_timeout=5):
         super().__init__(info_device, device_timeout)
 
+        self.pause_reset_buffer = 0.0001
+
     def _write_and_read(self, data):
         self._reset_buffer()
         self._write(data)
@@ -217,12 +223,24 @@ class Arduino(USBIODevice):
         if not("command" in data and "command" in result and data["command"]==result["command"]): raise ArduinoCommunicationException("Response received different from request sent")
         return result
     
-    def _reset_buffer(self):
+    def _reset_buffer(self, silent_time=0):
         if not (isinstance(self.device_connection, serial.Serial)):
             raise ValueError("Invalid connection")
         
+        to = self.device_connection.timeout
+
+        self.device_connection.timeout = 0
+        last_data_time = time.time()
+        while True:
+            data = self.device_connection.read(self.device_connection.in_waiting or 1)
+            if data: last_data_time = time.time()
+            else:
+                if (time.time() - last_data_time) > silent_time: break 
+            time.sleep(self.pause_reset_buffer)
         self.device_connection.reset_input_buffer()
         self.device_connection.reset_output_buffer()
+
+        self.device_connection.timeout = to
 
     def _check_connection(self):
         if not (isinstance(self.device_connection, serial.Serial)):
@@ -286,6 +304,7 @@ class Arduino(USBIODevice):
             raise ValueError("Incorrect parameters")
         
         self.device_connection.write(f"?{json.dumps(data)}!".encode())
+        #self.device_connection.flush() # Aspetto che siano mandati tutti sulla seriale
 
 
 class RawData(dict):
@@ -391,8 +410,9 @@ class DataRappresentor():
 
             if selection_area["start"] is None or selection_area["end"] is None: return
 
-            for artist in plotted_elements["data_analysis"]: artist.remove()
-            plotted_elements["data_analysis"].clear()
+            if "data_analysis" in plotted_elements:
+                for artist in plotted_elements["data_analysis"]: artist.remove()
+                plotted_elements["data_analysis"].clear()
 
             results_analysis = None
 
@@ -415,14 +435,17 @@ class DataRappresentor():
 
 
         def clear_plotted_analysis_elements():
-            for artist in plotted_elements["on_motion"]: artist.remove()
-            plotted_elements["on_motion"].clear()
+            if "on_motion" in plotted_elements:
+                for artist in plotted_elements["on_motion"]: artist.remove()
+                plotted_elements["on_motion"].clear()
 
-            for artist in plotted_elements["on_release"]: artist.remove()
-            plotted_elements["on_release"].clear()
+            if "on_release" in plotted_elements:
+                for artist in plotted_elements["on_release"]: artist.remove()
+                plotted_elements["on_release"].clear()
 
-            for artist in plotted_elements["data_analysis"]: artist.remove()
-            plotted_elements["data_analysis"].clear()
+            if "data_analysis" in plotted_elements:
+                for artist in plotted_elements["data_analysis"]: artist.remove()
+                plotted_elements["data_analysis"].clear()
 
             update_plot()
 
@@ -466,8 +489,9 @@ class DataRappresentor():
             nonlocal mouse_start
 
             if mouse_start is not None: 
-                for artist in plotted_elements["on_motion"]: artist.remove()
-                plotted_elements["on_motion"].clear()
+                if "on_motion" in plotted_elements:
+                    for artist in plotted_elements["on_motion"]: artist.remove()
+                    plotted_elements["on_motion"].clear()
                 canvas.draw_idle()
 
             if event.inaxes != ax and mouse_start is not None: mouse_start=None
@@ -551,7 +575,7 @@ class DataRappresentor():
             entries_params[info_param["key"]] = {"var":var, "info":info_param}
 
 
-        def confirm_and_close():
+        def confirm_analysis():
             if selection_area["start"] is None or selection_area["end"] is None or results_analysis is None: return
 
             selected_time = self.raw_data["time"][selection_area["start"]:selection_area["end"]+1]
@@ -637,6 +661,10 @@ class DataRappresentor():
         }
 
         win = tk.Toplevel()
+
+        if "win_analysis" not in open_windows: open_windows["win_analysis"] = []
+        open_windows["win_analysis"].append(win)
+
         win.title("Plot Viewer")
         win.geometry("1000x750")
         win.grid_columnconfigure(1, weight=1)
@@ -688,7 +716,7 @@ class DataRappresentor():
         ttk.Button(param_frame, text="Clear analysis", command=clear_analysis).grid(row=num_row+1, column=0, columnspan=2, pady=5, sticky="ew")
 
         # ---------------- Bottone finale ----------------    
-        ttk.Button(win, text="Calculating values", command=confirm_and_close).grid(row=2, column=1, pady=20)
+        ttk.Button(win, text="Calculating values", command=confirm_analysis).grid(row=2, column=1, pady=20)
 
         # ------------ Default initialization ----------
         update_view_x(0)
@@ -1204,6 +1232,18 @@ class DataRappresentor():
 
     def startRepresentation(self, test):
         smart_update_label(label_status_acquisition, "Initialization...", "black")
+
+        if "win_analysis" in open_windows: 
+            for w in open_windows["win_analysis"]: 
+                try: w.destroy()
+                except: pass
+            open_windows["win_warning"].clear()
+
+        if "win_warning" in open_windows:
+            for w in open_windows["win_warning"]:
+                try: w.destroy()
+                except: pass
+            open_windows["win_warning"].clear()
         
         self.stopRepresentation()
 
@@ -1272,7 +1312,10 @@ class DataAcquirer(threading.Thread):
         self.next_state = queue.Queue()
         self.reader=None
 
+        self.natual_next_state = None
+
         self.time_acquiring = 0.0005
+        self.pause_search_problems = 0.0001
     
 
     def run(self):
@@ -1280,76 +1323,99 @@ class DataAcquirer(threading.Thread):
             with self.acquiring:
 
                 try:
+                   
                     state_acquisition = self.next_state.get(block=False)
 
                     #print(f"State acquisition: {state_acquisition}")
 
+                    ns = None
+
                     if state_acquisition == StateDataAcquirer.START:
+                        self.events.put(StateDataAcquirer.START)
                         
                         try:
-                            self.reader = arduino.multiple_readings(timeout_close=0.5)
+                            self.reader = arduino.multiple_readings(silent_time_reset_buffer=0.5)
                             next(self.reader)
                             self.reader.send(StateMultipleReadings.START)
                             self.reader.send({"command":"start_reading"})
                             
-                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.GET)
+                            ns = StateDataAcquirer.GET
                         except Exception as e: 
-                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.STOP)
+                            ns = StateDataAcquirer.STOP
                             self.events.put(e)
-                        finally: self.events.put(StateDataAcquirer.START)
 
                     elif state_acquisition == StateDataAcquirer.STOP:
+                        self.events.put(StateDataAcquirer.STOP)
 
                         try:
-                            self.reader.send(StateMultipleReadings.STOP)
-                            self.reader.send({"command":"stop_reading"})
-
-                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.GET_LAST)
+                            if self.reader is not None:
+                                self.reader.send(StateMultipleReadings.STOP)
+                                self.reader.send({"command":"stop_reading"})
+                                ns = StateDataAcquirer.GET_LAST
+                            else: raise Exception("Reader is None")
                         except Exception as e: 
-                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.CLOSE)
+                            ns = StateDataAcquirer.CLOSE
                             self.events.put(e)
-                        finally: self.events.put(StateDataAcquirer.STOP)
 
                     elif state_acquisition == StateDataAcquirer.CLOSE:
-
+                        self.events.put(StateDataAcquirer.CLOSE)
                         try:
-                            try: self.reader.send(StateMultipleReadings.CLOSE)
+                            try: 
+                                if self.reader is not None: self.reader.send(StateMultipleReadings.CLOSE)
+                                else: raise Exception("Reader is None")
                             except StopIteration: pass
-                            self.reader = None
                         except Exception as e: self.events.put(e)
-                        finally:
-                            self.events.put(StateDataAcquirer.CLOSE)
+                        finally: self.reader = None
 
                     elif state_acquisition == StateDataAcquirer.GET:
                         
                         try:
-                            result = self.reader.send(StateMultipleReadings.NEXT)
-                            self.reader.send(None)
-                            data_queue.put(result)
-
-                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.GET)
+                            if self.reader is not None:
+                                result = self.reader.send(StateMultipleReadings.NEXT)
+                                self.reader.send(None)
+                                data_queue.put(result)
+                                ns = StateDataAcquirer.GET
+                            else: raise Exception("Reader is None")
                         except Exception as e:
                             data_queue.put(None)
-                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.STOP)
+                            ns = StateDataAcquirer.STOP
 
                     elif state_acquisition == StateDataAcquirer.GET_LAST:
 
                         try:
-                            result = self.reader.send(StateMultipleReadings.NEXT)
-                            self.reader.send(None)
-                            
-                            if "command" in result and result["command"] == "stop_reading": 
-                                data_queue.put(StateDataAcquirer.FINISH)
-                                if self.next_state.empty(): self.next_state.put(StateDataAcquirer.CLOSE)
-                            elif "command" in result and result["command"] != "stop_reading": 
-                                raise Exception("Problems reading")
-                            else: 
-                                data_queue.put(result)
-                                if self.next_state.empty(): self.next_state.put(StateDataAcquirer.GET_LAST)
-
+                            if self.reader is not None:
+                                result = self.reader.send(StateMultipleReadings.NEXT)
+                                self.reader.send(None)
+                                
+                                if "command" in result and result["command"] == "stop_reading": 
+                                    data_queue.put(StateDataAcquirer.FINISH)
+                                    ns = StateDataAcquirer.CLOSE
+                                elif "command" in result and result["command"] != "stop_reading": 
+                                    raise Exception("Problems reading")
+                                else: 
+                                    data_queue.put(result)
+                                    ns = StateDataAcquirer.GET_LAST
+                            else: raise Exception("Reader is None")
                         except Exception as e:
                             data_queue.put(None)
-                            if self.next_state.empty(): self.next_state.put(StateDataAcquirer.CLOSE)
+                            ns = StateDataAcquirer.CLOSE
+
+                    elif state_acquisition == StateDataAcquirer.START_REQUEST:
+                        self.events.put(StateDataAcquirer.START_REQUEST)
+
+                    elif state_acquisition == StateDataAcquirer.END_REQUEST:
+                        self.events.put(StateDataAcquirer.END_REQUEST)
+                        if self.natual_next_state is not None:
+                            self.next_state.put(self.natual_next_state)
+                            self.natual_next_state = None
+
+                    else: pass
+
+
+                    if self.next_state.empty(): self.next_state.put(ns)
+                    elif self.next_state.qsize()==1: self.natual_next_state = ns
+                    else: self.natual_next_state = None
+                
                             
                 except queue.Empty: pass
 
@@ -1358,20 +1424,26 @@ class DataAcquirer(threading.Thread):
 
     def startAcquisition(self):
         with self.acquiring: 
+            self.next_state.put(StateDataAcquirer.START_REQUEST)
             self.next_state.put(StateDataAcquirer.STOP)
             self.next_state.put(StateDataAcquirer.CLOSE)
             self.next_state.put(StateDataAcquirer.START)
+            self.next_state.put(StateDataAcquirer.END_REQUEST)
         return not self.check_problem(StateDataAcquirer.START)
 
     def requestStopAcquisition(self):
         with self.acquiring: 
+            self.next_state.put(StateDataAcquirer.START_REQUEST)
             self.next_state.put(StateDataAcquirer.STOP)
+            self.next_state.put(StateDataAcquirer.END_REQUEST)
         return not self.check_problem(StateDataAcquirer.STOP)
 
     def stopAcquisition(self):
         with self.acquiring:
+            self.next_state.put(StateDataAcquirer.START_REQUEST)
             self.next_state.put(StateDataAcquirer.STOP)
             self.next_state.put(StateDataAcquirer.CLOSE)
+            self.next_state.put(StateDataAcquirer.END_REQUEST)
         return not self.check_problem(StateDataAcquirer.CLOSE)
 
     def stopAcquisitionActivity(self):
@@ -1379,14 +1451,24 @@ class DataAcquirer(threading.Thread):
         self.acquisition_activity=False
         
 
-    def check_problem(self, state):
-        problem = False
+    def check_problem(self, state, num=0):
+        problem = {}
+        start_request = False
+        last_state = None
         while True:
             event = self.events.get()
-            if isinstance(event, StateDataAcquirer) and event==state: break
-            elif isinstance(event, StateDataAcquirer) and event!=state: problem = False
-            elif not isinstance(event, StateDataAcquirer): problem = True
-        return problem
+            #print(event)
+            if isinstance(event, StateDataAcquirer) and event==StateDataAcquirer.START_REQUEST: start_request = True
+            elif isinstance(event, StateDataAcquirer) and event==StateDataAcquirer.END_REQUEST and start_request: break
+            elif isinstance(event, StateDataAcquirer) and start_request: 
+                if event not in problem.keys(): problem[event] = [[]]
+                elif event in problem.keys(): problem[event].append([])
+                last_state = event
+            elif not isinstance(event, StateDataAcquirer) and start_request: 
+                problem[last_state][len(problem[last_state])-1].append(event)
+            time.sleep(self.pause_search_problems)
+
+        return len(problem[state][num])!=0
     
 
 
@@ -1425,7 +1507,7 @@ def open_device_connection(info_device, timeout):
     global arduino, info_load_cells
     close_device_connection()
     smart_update_label(label_status_connection, "Connecting...", "orange")
-    try: 
+    try:
         arduino = Arduino(info_device, timeout) 
         arduino.open_connection()
         info_load_cells = arduino.write_and_read({"command":"get_info"})["lc"]
@@ -1521,19 +1603,25 @@ def smart_update_label(label, text=None, fg=None):
 
 
 def show_warning(title, message):
-    root = tk.Tk()
-    root.withdraw()
+    warn = tk.Tk()
+
+    if "win_warning" not in open_windows: open_windows["win_warning"] = []
+    open_windows["win_warning"].append(warn)
+
+    warn.withdraw()
     messagebox.showwarning(title, message)
 
 
 
 
 # -------------------------------------
-
+open_windows = {}
 info_load_cells = []
 list_info_device = []
 
 root = tk.Tk()
+open_windows["root"] = root
+
 arduino = None
 data_queue = queue.Queue()
 
