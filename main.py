@@ -415,16 +415,17 @@ class DataRappresentor():
 
             results_analysis = None
 
-            selected_time = self.raw_data["time"][selection_area["start"]:selection_area["end"]+1]
-            selected_lc = self.raw_data["lc"][:, selection_area["start"]:selection_area["end"]+1]
-            selected_force = np.sum(selected_lc, axis=0)
-            
-            if entries_params["use_filter"]["info"]["value"]:
-                selected_force_filtered = savgol_filter(selected_force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
-                plotted_elements["data_analysis"].append(ax.plot(selected_time, selected_force_filtered, label='Filtered force', color='gray')[0])
-                selected_force = selected_force_filtered
+            try:  
+                selected_time = self.raw_data["time"][selection_area["start"]:selection_area["end"]+1]
+                selected_lc = self.raw_data["lc"][:, selection_area["start"]:selection_area["end"]+1]
+                selected_force = np.sum(selected_lc, axis=0)
+                
+                if entries_params["use_filter"]["info"]["value"]:
+                    selected_force_filtered = savgol_filter(selected_force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
+                    plotted_elements["data_analysis"].append(ax.plot(selected_time, selected_force_filtered, label='Filtered force', color='gray')[0])
+                    selected_force = selected_force_filtered
 
-            try:        
+                  
                 results_analysis, plot_el = analysis_result_calculation(selected_force, selected_time, selection_area["start"], ax, entries_params)
                 plotted_elements["data_analysis"] += plot_el
 
@@ -573,15 +574,18 @@ class DataRappresentor():
         def confirm_analysis():
             if selection_area["start"] is None or selection_area["end"] is None or results_analysis is None: return
 
-            selected_time = self.raw_data["time"][selection_area["start"]:selection_area["end"]+1]
-            selected_lc = self.raw_data["lc"][:, selection_area["start"]:selection_area["end"]+1]
-            selected_force = np.sum(selected_lc, axis=0)
+            try:
+                selected_time = self.raw_data["time"][selection_area["start"]:selection_area["end"]+1]
+                selected_lc = self.raw_data["lc"][:, selection_area["start"]:selection_area["end"]+1]
+                selected_force = np.sum(selected_lc, axis=0)
 
-            if entries_params["use_filter"]["info"]["value"]:
-                selected_force_filtered = savgol_filter(selected_force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
-                selected_force = selected_force_filtered
-            
-            analysis_callback(selected_force, selected_time, selection_area["start"], results_analysis, entries_params)
+                if entries_params["use_filter"]["info"]["value"]:
+                    selected_force_filtered = savgol_filter(selected_force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
+                    selected_force = selected_force_filtered
+                
+                analysis_callback(selected_force, selected_time, selection_area["start"], results_analysis, entries_params)
+            except Exception as e: show_warning("Error", f"Problem in the analyses: {e}")
+
             #win.destroy()
 
         
@@ -640,7 +644,7 @@ class DataRappresentor():
 
         selection_area = {"start":None, "end":None}
         params = [
-            {"label":"Savgol Window Length","type":int,"value":51,"key":"savgol_filter_window_length","ptype":"processing","cond":lambda x: 1 <= x <= np.iinfo(np.uint32).max and x % 2 == 1},
+            {"label":"Savgol Window Length","type":int,"value":21,"key":"savgol_filter_window_length","ptype":"processing","cond":lambda x: 1 <= x <= np.iinfo(np.uint32).max and x % 2 == 1},
             {"label":"Savgol Polyorder","type":int,"value":3,"key":"savgol_filter_polyorder","ptype":"processing","cond":lambda x: 0 <= x <= np.iinfo(np.uint32).max},
             {"label":"Enable filter","type":bool,"value":True,"key":"use_filter","ptype":"processing","cond":lambda x: True},
             {"label":"Window duration (s)","type":float,"value":2,"key":"window_duration","ptype":"interface","cond":lambda x: 0 < x}
@@ -722,19 +726,23 @@ class DataRappresentor():
 
 
         def analysis_result_calculation(force, time, start_idx, ax, entries_params):
-        
+            
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
             force_net = force - weight
             acceleration = force_net / self.jump_data["mass"]
-            velocity = cumtrapz(acceleration, time, initial=0)
-
+            
             start_amortization = np.where(force >= weight*(entries_params["start_threshold"]["info"]["value"]/100))[0][0]
-            takeoff = start_amortization + np.where(force[start_amortization:] <= weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))[0][0]
-            start_push_off =  np.where(np.abs(velocity) <= entries_params["zero_velocity_threshold"]["info"]["value"])[0][0]
+
+            v_impact = - math.sqrt(2*self.jump_data["acceleration_of_gravity"]*entries_params["jump_height"]["info"]["value"])
+            velocity = cumtrapz(acceleration[start_amortization:], time[start_amortization:], initial=0) + v_impact
+            #ax.plot(time[start_amortization:], velocity*100, color="red")
+
+            start_push_off =  start_amortization + np.where(np.abs(velocity) <= entries_params["zero_velocity_threshold"]["info"]["value"])[0][0]
+            takeoff = start_push_off + np.where(force[start_push_off:] <= weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))[0][0]
             landing = takeoff + np.where(force[takeoff:] > weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))[0][0]
             peak_amortization_force = start_amortization + np.argmax(force[start_amortization:start_push_off])
             peak_landing_force = landing + np.argmax(force[landing:])
-
+            end_push = start_push_off + np.where(force[start_push_off:] <= weight)[0][0]
 
             # Save result
 
@@ -744,7 +752,8 @@ class DataRappresentor():
                 "peak_amortization_force": peak_amortization_force,
                 "takeoff": takeoff,
                 "landing": landing,
-                "peak_landing_force": peak_landing_force
+                "peak_landing_force": peak_landing_force,
+                "end_push": end_push
             }
 
             # ==== 3. Plot ====
@@ -822,7 +831,8 @@ class DataRappresentor():
             params = [
                 {"label":"Start Threshold (%)","type":float,"value":2,"key":"start_threshold","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0},
                 {"label":"Takeoff Threshold (%)","type":float,"value":5,"key":"takeoff_threshold","ptype":"processing","cond":lambda x: 0.0 <= x <= 100.0},
-                {"label":"Zero Velocity Threshold m/s","type":float,"value":0.1,"key":"zero_velocity_threshold","ptype":"processing","cond":lambda x: 0.0 <= x}
+                {"label":"Zero Velocity Threshold (m/s)","type":float,"value":0.1,"key":"zero_velocity_threshold","ptype":"processing","cond":lambda x: 0.0 <= x},
+                {"label":"Jump height (m)","type":float,"value":0.30,"key":"jump_height","ptype":"processing","cond":lambda x: 0.0 <= x}
             ]
             analyze_btn = ttk.Button(frame_control_test, text="Analyze data", command=lambda: self.analysisJumpPhase(analysis_result_calculation, analysis_callback, params))
             analyze_btn.pack(padx=20, pady=20)
@@ -1006,7 +1016,7 @@ class DataRappresentor():
 
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
             force_net = force - weight
-            impulse = np.trapz(force_net[results_analysis["balancing"]:results_analysis["end_push"]+1], time[results_analysis["balancing"]:results_analysis["end_push"]+1])
+            impulse = np.trapz(force_net[results_analysis["balancing"]:results_analysis["takeoff"]+1], time[results_analysis["balancing"]:results_analysis["takeoff"]+1])
             v0 = impulse / self.jump_data["mass"]
             h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
             
