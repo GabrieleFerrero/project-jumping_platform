@@ -17,7 +17,7 @@ from scipy.signal import savgol_filter
 from matplotlib.patches import Rectangle
 import math
 from scipy.integrate import cumtrapz
-
+from collections import deque
 
 
 class TimeoutException(Exception):
@@ -215,6 +215,7 @@ class Arduino(USBIODevice):
         super().__init__(info_device, device_timeout)
 
         self.pause_reset_buffer = 0.0001
+        self.buffer = deque()
 
     def _write_and_read(self, data):
         self._reset_buffer()
@@ -239,6 +240,8 @@ class Arduino(USBIODevice):
             time.sleep(self.pause_reset_buffer)
         self.device_connection.reset_input_buffer()
         self.device_connection.reset_output_buffer()
+
+        self.buffer.clear()
 
         self.device_connection.timeout = to
 
@@ -276,10 +279,18 @@ class Arduino(USBIODevice):
         if not (isinstance(self.device_connection, serial.Serial)):
             raise ValueError("Invalid connection")
         
+        to = self.device_connection.timeout
+        self.device_connection.timeout = 0
+        
         response=""
         exit_while=False
         while exit_while==False:
-            char=self.device_connection.read(size=1).decode(encoding='utf-8')
+            data = self.device_connection.read_all().decode(encoding='utf-8')
+            for c in data: self.buffer.append(c)
+
+            try: char=self.buffer.popleft()
+            except IndexError: char=""
+
             if char:
                 if char=='?': response=""
                 elif char=='!': exit_while=True
@@ -287,7 +298,10 @@ class Arduino(USBIODevice):
                 elif char=='\n': pass
                 else: response += char
             else:
-                raise ArduinoCommunicationException("Timeout expired while waiting for data")
+                #raise ArduinoCommunicationException("Timeout expired while waiting for data")
+                pass
+            
+        self.device_connection.timeout = to
 
         if response: 
             #print(f"Read: {response}")
@@ -295,6 +309,8 @@ class Arduino(USBIODevice):
             if "code" in result and result["code"] == "ERROR": raise ArduinoCommunicationException(f"Bad json: {result}")
             return result
         else: return json.loads("{}")
+        
+
     
     def _write(self, data):
         #print(f"Write: {data}")
