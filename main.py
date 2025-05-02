@@ -426,7 +426,7 @@ class DataRappresentor():
                     selected_force = selected_force_filtered
 
                   
-                results_analysis, plot_el = analysis_result_calculation(selected_force, selected_time, selection_area["start"], ax, entries_params)
+                results_analysis, plot_el = analysis_result_calculation(selected_force, selected_time, selection_area["start"], selection_area["end"], ax, entries_params)
                 plotted_elements["data_analysis"] += plot_el
 
             except Exception as e: show_warning("Error", f"Problem in the analyses: {e}")
@@ -583,7 +583,7 @@ class DataRappresentor():
                     selected_force_filtered = savgol_filter(selected_force, window_length=entries_params["savgol_filter_window_length"]["info"]["value"], polyorder=entries_params["savgol_filter_polyorder"]["info"]["value"])
                     selected_force = selected_force_filtered
                 
-                analysis_callback(selected_force, selected_time, selection_area["start"], results_analysis, entries_params)
+                analysis_callback(selected_force, selected_time, selection_area["start"], selection_area["end"], results_analysis, entries_params)
             except Exception as e: show_warning("Error", f"Problem in the analyses: {e}")
 
             #win.destroy()
@@ -678,6 +678,7 @@ class DataRappresentor():
         canvas_widget.pack(fill=tk.BOTH, expand=True)
         ax.set_autoscaley_on(True)
         ax.set_autoscalex_on(False)
+        plt.close(fig)
 
         for i, vec in enumerate(self.raw_data["lc"]): plotted_elements["data_input"].append(ax.plot(self.raw_data["time"], vec, label=f"Force {info_load_cells[i]}", alpha=0.3)[0])
         plotted_elements["data_input"].append(ax.plot(self.raw_data["time"], np.sum(self.raw_data["lc"], axis=0), label="Total force", linewidth=2, color='black', alpha=0.6)[0])
@@ -725,7 +726,7 @@ class DataRappresentor():
         # --------------------------------------------
 
 
-        def analysis_result_calculation(force, time, start_idx, ax, entries_params):
+        def analysis_result_calculation(force, time, start_idx, end_idx, ax, entries_params):
             
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
             force_net = force - weight
@@ -785,19 +786,26 @@ class DataRappresentor():
             return result, plotted_elements
         
 
-        def analysis_callback(force, time, start_idx, results_analysis, entries_params):
+        def analysis_callback(force, time, start_idx, end_idx, results_analysis, entries_params):
 
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
             force_net = force - weight
             impulse = np.trapz(force_net[results_analysis["start_push_off"]:results_analysis["takeoff"]+1], time[results_analysis["start_push_off"]:results_analysis["takeoff"]+1])
             v0 = impulse / self.jump_data["mass"]
-            h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
+            h_force = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
             
             time_contact = time[results_analysis["takeoff"]] - time[results_analysis["start_amortization"]]
             time_flight = time[results_analysis["landing"]]-time[results_analysis["takeoff"]]
 
+            h_time_flight = 0.5*self.jump_data["acceleration_of_gravity"]*((time_flight/2)**2)
+            h_avg = (h_force+h_time_flight)/2
+
+
+
             smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
-            smart_update_label(label_indicator_jump_height, f"Jump height: {round(h*100,2)} cm", "black")
+            smart_update_label(label_indicator_jump_height_force, f"Jump height (force): {round(h_force*100,2)} cm", "black")
+            smart_update_label(label_indicator_jump_height_time_flight, f"Jump height (time flight): {round(h_time_flight*100,2)} cm", "black")
+            smart_update_label(label_indicator_jump_height_avg, f"Jump height (avg): {round(h_avg*100,2)} cm", "black")
             smart_update_label(label_indicator_average_reaction_force, f"Impulse: {round(impulse,2)} m*kg/s", "black")
             smart_update_label(label_indicator_jumping_speed, f"Jumping speed: {round(v0,2)} m/s", "black")
             smart_update_label(label_indicator_flight_time, f"Flight time: {round(time_flight,5)} s", "black")
@@ -848,22 +856,28 @@ class DataRappresentor():
 
  
         label_indicator_mass = tk.Label(label_frame_indicator_general_data, text=f"Mass: {round(self.jump_data["mass"],2)} Kg", font=("Arial", 12))
-        label_indicator_mass.pack(side=tk.LEFT, padx=20)
+        label_indicator_mass.grid(row=0, column=0, sticky='w', pady=5, padx=10)
+
+        label_indicator_jump_height_force = tk.Label(label_frame_indicator_general_data, text=f"Jump height (force): {0.0} cm", font=("Arial", 12))
+        label_indicator_jump_height_force.grid(row=0, column=1, sticky='w', pady=5, padx=10)
+
+        label_indicator_jump_height_time_flight = tk.Label(label_frame_indicator_general_data, text=f"Jump height (time flight): {0.0} cm", font=("Arial", 12))
+        label_indicator_jump_height_time_flight.grid(row=0, column=2, sticky='w', pady=5, padx=10)
  
-        label_indicator_jump_height = tk.Label(label_frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
-        label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
+        label_indicator_jump_height_avg = tk.Label(label_frame_indicator_general_data, text=f"Jump height (avg): {0.0} cm", font=("Arial", 12))
+        label_indicator_jump_height_avg.grid(row=0, column=3, sticky='w', pady=5, padx=10)
  
         label_indicator_average_reaction_force = tk.Label(label_frame_indicator_general_data, text=f"Impulse: {0.0} m*Kg/s", font=("Arial", 12))
-        label_indicator_average_reaction_force.pack(side=tk.LEFT, padx=20)
+        label_indicator_average_reaction_force.grid(row=1, column=0, sticky='w', pady=5, padx=10)
  
         label_indicator_jumping_speed = tk.Label(label_frame_indicator_general_data, text=f"Jumping speed: {0.0} m/s", font=("Arial", 12))
-        label_indicator_jumping_speed.pack(side=tk.LEFT, padx=20)
+        label_indicator_jumping_speed.grid(row=1, column=1, sticky='w', pady=5, padx=10)
  
         label_indicator_flight_time = tk.Label(label_frame_indicator_general_data, text=f"Flight time: {0.0} s", font=("Arial", 12))
-        label_indicator_flight_time.pack(side=tk.LEFT, padx=20)
+        label_indicator_flight_time.grid(row=1, column=2, sticky='w', pady=5, padx=10)
  
         label_indicator_time_contact = tk.Label(label_frame_indicator_general_data, text=f"Contact time: {0.0} s", font=("Arial", 12))
-        label_indicator_time_contact.pack(side=tk.LEFT, padx=20)
+        label_indicator_time_contact.grid(row=1, column=3, sticky='w', pady=5, padx=10)
 
  
         label_indicator_start_amortization = tk.Label(label_frame_indicator_jump_event, text=f"Start amortization: {0.0} s", font=("Arial", 12))
@@ -917,6 +931,7 @@ class DataRappresentor():
         toolbar = NavigationToolbar2Tk(canvas, frame_chart)
         toolbar.pack(side=tk.TOP, fill=tk.X)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        plt.close(fig)
         # --------------------------------------------
                  
 
@@ -928,7 +943,7 @@ class DataRappresentor():
 
         # --------------------------------------------
 
-        def analysis_result_calculation(force, time, start_idx, ax, entries_params):
+        def analysis_result_calculation(force, time, start_idx, end_idx, ax, entries_params):
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
 
             # Event 1: Start movement
@@ -1012,20 +1027,24 @@ class DataRappresentor():
             return result, plotted_elements
         
 
-        def analysis_callback(force, time, start_idx, results_analysis, entries_params):
+        def analysis_callback(force, time, start_idx, end_idx, results_analysis, entries_params):
 
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
             force_net = force - weight
             impulse = np.trapz(force_net[results_analysis["balancing"]:results_analysis["takeoff"]+1], time[results_analysis["balancing"]:results_analysis["takeoff"]+1])
             v0 = impulse / self.jump_data["mass"]
-            h = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
+            h_force = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
             
             time_contact = time[results_analysis["takeoff"]] - time[results_analysis["start_movement"]]
             time_flight = time[results_analysis["landing"]]-time[results_analysis["takeoff"]]
 
-            
+            h_time_flight = 0.5*self.jump_data["acceleration_of_gravity"]*((time_flight/2)**2)
+            h_avg = (h_force+h_time_flight)/2
+
             smart_update_label(label_indicator_mass, f"Mass: {round(self.jump_data["mass"],2)} Kg", "black")
-            smart_update_label(label_indicator_jump_height, f"Jump height: {round(h*100,2)} cm", "black")
+            smart_update_label(label_indicator_jump_height_force, f"Jump height (force): {round(h_force*100,2)} cm", "black")
+            smart_update_label(label_indicator_jump_height_time_flight, f"Jump height (time flight): {round(h_time_flight*100,2)} cm", "black")
+            smart_update_label(label_indicator_jump_height_avg, f"Jump height (avg): {round(h_avg*100,2)} cm", "black")
             smart_update_label(label_indicator_average_reaction_force, f"Impulse: {round(impulse,2)} m*kg/s", "black")
             smart_update_label(label_indicator_jumping_speed, f"Jumping speed: {round(v0,2)} m/s", "black")
             smart_update_label(label_indicator_flight_time, f"Flight time: {round(time_flight,5)} s", "black")
@@ -1072,22 +1091,28 @@ class DataRappresentor():
         label_frame_indicator_jump_event.pack(fill="both")
 
         label_indicator_mass = tk.Label(label_frame_indicator_general_data, text=f"Mass: {round(self.jump_data["mass"],2)} Kg", font=("Arial", 12))
-        label_indicator_mass.pack(side=tk.LEFT, padx=20)
+        label_indicator_mass.grid(row=0, column=0, sticky='w', pady=5, padx=10)
 
-        label_indicator_jump_height = tk.Label(label_frame_indicator_general_data, text=f"Jump height: {0.0} cm", font=("Arial", 12))
-        label_indicator_jump_height.pack(side=tk.LEFT, padx=20)
+        label_indicator_jump_height_force = tk.Label(label_frame_indicator_general_data, text=f"Jump height (force): {0.0} cm", font=("Arial", 12))
+        label_indicator_jump_height_force.grid(row=0, column=1, sticky='w', pady=5, padx=10)
+
+        label_indicator_jump_height_time_flight = tk.Label(label_frame_indicator_general_data, text=f"Jump height (time flight): {0.0} cm", font=("Arial", 12))
+        label_indicator_jump_height_time_flight.grid(row=0, column=2, sticky='w', pady=5, padx=10)
+ 
+        label_indicator_jump_height_avg = tk.Label(label_frame_indicator_general_data, text=f"Jump height (avg): {0.0} cm", font=("Arial", 12))
+        label_indicator_jump_height_avg.grid(row=0, column=3, sticky='w', pady=5, padx=10)
 
         label_indicator_average_reaction_force = tk.Label(label_frame_indicator_general_data, text=f"Impulse: {0.0} m*Kg/s", font=("Arial", 12))
-        label_indicator_average_reaction_force.pack(side=tk.LEFT, padx=20)
+        label_indicator_average_reaction_force.grid(row=1, column=0, sticky='w', pady=5, padx=10)
 
         label_indicator_jumping_speed = tk.Label(label_frame_indicator_general_data, text=f"Jumping speed: {0.0} m/s", font=("Arial", 12))
-        label_indicator_jumping_speed.pack(side=tk.LEFT, padx=20)
+        label_indicator_jumping_speed.grid(row=1, column=1, sticky='w', pady=5, padx=10)
 
         label_indicator_flight_time = tk.Label(label_frame_indicator_general_data, text=f"Flight time: {0.0} s", font=("Arial", 12))
-        label_indicator_flight_time.pack(side=tk.LEFT, padx=20)
+        label_indicator_flight_time.grid(row=1, column=2, sticky='w', pady=5, padx=10)
 
         label_indicator_time_contact = tk.Label(label_frame_indicator_general_data, text=f"Contact time: {0.0} s", font=("Arial", 12))
-        label_indicator_time_contact.pack(side=tk.LEFT, padx=20)
+        label_indicator_time_contact.grid(row=1, column=3, sticky='w', pady=5, padx=10)
 
 
         label_indicator_start_movement = tk.Label(label_frame_indicator_jump_event, text=f"Start movement: {0.0} s", font=("Arial", 12))
@@ -1144,11 +1169,115 @@ class DataRappresentor():
         toolbar = NavigationToolbar2Tk(canvas, frame_chart)
         toolbar.pack(side=tk.TOP, fill=tk.X)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        plt.close(fig)
         # --------------------------------------------
                  
 
         return 50000, func1, (), func2, ()
+
     
+    def testCalculateForce(self):
+        # --------------------------------------------
+
+        def analysis_result_calculation(force, time, start_idx, end_idx, ax, entries_params):
+
+            force_avg = np.mean(force)
+            force_max = np.argmax(force)
+
+
+            # Save result
+
+            result = {
+                "force_max": force_max
+            }
+
+            # ==== 3. Plot ====
+
+            plotted_elements = []
+
+            events = {
+                "Force Max": force_max,
+            }
+            event_color = ['red']
+
+            for (name, idx), color in zip(events.items(), event_color):
+                plotted_elements.append(ax.scatter(time[idx], force[idx], marker='o', color=color))
+                plotted_elements.append(ax.text(time[idx], force[idx] + 30, name, color=color, fontsize=9, ha='center'))
+
+            plotted_elements.append(ax.hlines(y=force_avg, xmin=time[0], xmax=time[-1], color='green', alpha=0.2, label='Force avg'))
+
+            return result, plotted_elements
+        
+
+        def analysis_callback(force, time, start_idx, end_idx, results_analysis, entries_params):
+
+            force_avg = np.mean(force)
+            resulting_mass = force_avg / self.jump_data["acceleration_of_gravity"]
+            max_mass = force[results_analysis["force_max"]] / self.jump_data["acceleration_of_gravity"]
+
+            smart_update_label(label_indicator_resulting_mass, f"Resulting Mass: {round(resulting_mass,5)} Kg", "black")
+            smart_update_label(label_indicator_max_mass, f"Max Mass: {round(max_mass,5)} Kg", "black")
+            
+        
+        def func1():
+            pass
+
+
+        def func2():
+            if not (self.raw_data and self.raw_data["size"]>0): return 
+
+            line.set_data(self.raw_data["time"], np.sum(self.raw_data["lc"], axis=0))
+            axis.relim()
+            axis.autoscale_view()
+            canvas.draw()
+
+            clear_frame(frame_control_test)
+            params = []
+            analyze_btn = ttk.Button(frame_control_test, text="Analyze data", command=lambda: self.analysisJumpPhase(analysis_result_calculation, analysis_callback, params))
+            analyze_btn.pack(padx=20, pady=20)
+            automatic_scaling()  
+
+
+        # --------------------------------------------
+
+        label_indicator_resulting_mass = tk.Label(frame_indicator, text=f"Resulting Mass: {round(0.0,5)} Kg", font=("Arial", 12))
+        label_indicator_resulting_mass.grid(row=0, column=0, sticky='w', pady=5, padx=10)
+
+        label_indicator_max_mass = tk.Label(frame_indicator, text=f"Max Mass: {round(0.0,5)} Kg", font=("Arial", 12))
+        label_indicator_max_mass.grid(row=0, column=1, sticky='w', pady=5, padx=10)
+
+       
+
+
+        # --------------------------------------------
+        fig, axis = plt.subplots(1, 1, figsize=(5, 2))
+        fig.tight_layout()  # Improve the layout
+        fig.subplots_adjust(hspace=0.50)  # Increase vertical space between charts
+        axis.grid(True)
+
+        # Creating empty lines
+        line = axis.plot([], [])[0]
+
+        # Axis configuration
+        axis.set_title(f"Mass chart")
+        axis.set_xlabel("Time (s)")
+        axis.set_ylabel("GRF (N)")
+
+        # Tkinter Integration
+        canvas = FigureCanvasTkAgg(fig, master=frame_chart)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas.draw()
+
+        # Adding the toolbar above the chart
+        toolbar = NavigationToolbar2Tk(canvas, frame_chart)
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        plt.close(fig)
+        # --------------------------------------------
+                 
+
+        return 50000, func1, (), func2, ()
+     
 
     def testCalculateMass(self):
 
@@ -1199,6 +1328,7 @@ class DataRappresentor():
         toolbar = NavigationToolbar2Tk(canvas, frame_chart)
         toolbar.pack(side=tk.TOP, fill=tk.X)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        plt.close(fig)
         # --------------------------------------------
      
         return 50000, func1, (), func2, ()
@@ -1650,6 +1780,8 @@ button_test_depth_jump = tk.Button(frame_acquisition, text="Depth jump", command
 button_test_depth_jump.pack(side=tk.LEFT, padx=20)
 button_test_calculate_mass = tk.Button(frame_acquisition, text="Calculate mass", command=lambda: command_button_test(data_rappresentor.testCalculateMass))
 button_test_calculate_mass.pack(side=tk.LEFT, padx=20)
+button_test_calculate_force = tk.Button(frame_acquisition, text="Calculate force", command=lambda: command_button_test(data_rappresentor.testCalculateForce))
+button_test_calculate_force.pack(side=tk.LEFT, padx=20)
 button_stop_test = tk.Button(frame_acquisition, text="Stop test", command=data_rappresentor.requestStopRepresentation)
 button_stop_test.pack(side=tk.LEFT, padx=20)
 button_force_stop = tk.Button(frame_acquisition, text="Force stop", command=data_rappresentor.stopRepresentation)
