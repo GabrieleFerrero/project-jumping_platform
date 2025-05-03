@@ -1,2 +1,6 @@
 # Ignore the virtual environment
 .venv/
+
+# Ignore file for exe creation
+build/
+main.spec
