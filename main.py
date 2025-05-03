@@ -16,7 +16,7 @@ from functools import partial
 from scipy.signal import savgol_filter
 from matplotlib.patches import Rectangle
 import math
-from scipy.integrate import cumtrapz
+from scipy.integrate import cumulative_trapezoid, trapezoid
 from collections import deque
 
 
@@ -624,7 +624,7 @@ class DataRappresentor():
             handles, labels = ax.get_legend_handles_labels()
             legend = ax.legend(handles, labels)
 
-            for handle, label in zip(legend.legendHandles, labels):
+            for handle, label in zip(legend.legend_handles, labels):
                 for artist in ax.get_children():
                     if hasattr(artist, "get_label") and artist.get_label() == label:
                         if not hasattr(artist, "_original_alpha"):
@@ -751,7 +751,7 @@ class DataRappresentor():
             start_amortization = np.where(force >= weight*(entries_params["start_threshold"]["info"]["value"]/100))[0][0]
 
             v_impact = - math.sqrt(2*self.jump_data["acceleration_of_gravity"]*entries_params["jump_height"]["info"]["value"])
-            velocity = cumtrapz(acceleration[start_amortization:], time[start_amortization:], initial=0) + v_impact
+            velocity = cumulative_trapezoid(acceleration[start_amortization:], time[start_amortization:], initial=0) + v_impact
             #ax.plot(time[start_amortization:], velocity*100, color="red")
 
             start_push_off =  start_amortization + np.where(np.abs(velocity) <= entries_params["zero_velocity_threshold"]["info"]["value"])[0][0]
@@ -806,7 +806,7 @@ class DataRappresentor():
 
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
             force_net = force - weight
-            impulse = np.trapz(force_net[results_analysis["start_push_off"]:results_analysis["takeoff"]+1], time[results_analysis["start_push_off"]:results_analysis["takeoff"]+1])
+            impulse = trapezoid(force_net[results_analysis["start_push_off"]:results_analysis["takeoff"]+1], time[results_analysis["start_push_off"]:results_analysis["takeoff"]+1])
             v0 = impulse / self.jump_data["mass"]
             h_force = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
             
@@ -986,8 +986,8 @@ class DataRappresentor():
 
             # Calcola impulso negativo
             force_net = force - weight
-            negative_impulse = np.trapz(force_net[start_movement:start_deceleration], time[start_movement:start_deceleration])
-            cumulative_area = cumtrapz(force_net[start_deceleration:], time[start_deceleration:], initial=0)
+            negative_impulse = trapezoid(force_net[start_movement:start_deceleration], time[start_movement:start_deceleration])
+            cumulative_area = cumulative_trapezoid(force_net[start_deceleration:], time[start_deceleration:], initial=0)
             # 5. Trova quando l'area cumulativa compensa l'impulso negativo
             balancing = start_deceleration + np.where(cumulative_area >= abs(negative_impulse))[0][0]
 
@@ -1047,7 +1047,7 @@ class DataRappresentor():
 
             weight = self.jump_data["mass"]*self.jump_data["acceleration_of_gravity"]
             force_net = force - weight
-            impulse = np.trapz(force_net[results_analysis["balancing"]:results_analysis["takeoff"]+1], time[results_analysis["balancing"]:results_analysis["takeoff"]+1])
+            impulse = trapezoid(force_net[results_analysis["balancing"]:results_analysis["takeoff"]+1], time[results_analysis["balancing"]:results_analysis["takeoff"]+1])
             v0 = impulse / self.jump_data["mass"]
             h_force = (v0 ** 2) / (2 * self.jump_data["acceleration_of_gravity"])
             
@@ -1669,9 +1669,12 @@ def verify_the_possibility_of_communicating():
         if arduino is not None and arduino.check_connection(): 
             smart_update_label(label_status_connection, "Available and connected", "green")
             return StateCommunicationDevice.AVAILABLE_CONNECTED
-        else:
+        elif arduino is not None and not arduino.check_connection():
             smart_update_label(label_status_connection, "Available but not connected", "red")
             return StateCommunicationDevice.AVAILABLE_NOT_CONNECTED
+        else:
+            smart_update_label(label_status_connection, "Not available", "red")
+            return StateCommunicationDevice.NOT_AVAILABLE
     except ResourceBusyException: 
         smart_update_label(label_status_connection, "Not available", "red")
         return StateCommunicationDevice.NOT_AVAILABLE
