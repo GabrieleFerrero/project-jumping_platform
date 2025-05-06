@@ -965,16 +965,16 @@ class DataRappresentor():
             # Event 1: Start movement
             start_movement = np.where(force <= weight*(entries_params["start_threshold"]["info"]["value"]/100))[0][0]
 
-            # Event 3: Start deceleration = primo valore forza ~0 dopo start braking
+            # Event 3: Start deceleration
             start_deceleration = start_movement + np.where(force[start_movement:] >= weight)[0][0]
 
-            # Event 2: Start braking = primo zero crossing dopo start movement
+            # Event 2: Start braking
             start_braking = start_movement + np.argmin(force[start_movement:start_deceleration])
 
             # Event 5: Takeoff = primo punto dopo peak_takeoff_force con forza sotto soglia
             takeoff = start_deceleration + np.where(force[start_deceleration:] <= weight*(entries_params["takeoff_threshold"]["info"]["value"]/100))[0][0]
 
-            # Event 4: Start concentric = primo zero crossing dopo deceleration
+            # Event 4: Start concentric
             peak_takeoff_force = start_deceleration + np.argmax(force[start_deceleration:takeoff])
 
             # Event 6: Landing = primo punto dopo takeoff con forza sopra soglia
